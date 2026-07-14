@@ -7,7 +7,7 @@ no reasoning and talks to no LLM.
 
 from dataclasses import dataclass
 
-from tools import metadata
+from tools import metadata, set_project_root
 
 
 @dataclass
@@ -22,5 +22,7 @@ class ContextCollector:
     """Collect a private, structural map of a project directory."""
 
     def collect(self, path: str = ".") -> ProjectContext:
-        raw = metadata.invoke({"path": path})
-        return ProjectContext(path=path, raw=raw)
+        # Confine every tool to this folder for the rest of the session.
+        root = set_project_root(path)
+        raw = metadata.invoke({"path": str(root)})
+        return ProjectContext(path=str(root), raw=raw)

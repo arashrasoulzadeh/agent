@@ -1,23 +1,30 @@
-"""
-Edit file tool.
+"""Filesystem `edit` tool."""
 
-This module provides functionality to edit files in a specified project directory.
-"""
+from langchain_core.tools import tool
 
-import os
+from tools.guard import is_secret, outside_refusal, refusal, resolve_in_root
 
 
-def edit_file(file_path: str, new_content: str) -> None:
+@tool
+def edit(path: str, content: str) -> str:
+    """Replace the full contents of a file that already exists.
+
+    Args:
+        path: Path to the file to edit, inside the project. It must exist.
+        content: The new full contents of the file.
     """
-    Edits the specified file with new content.
+    if is_secret(path):
+        return refusal(path)
 
-    :param file_path: Path to the file to be edited.
-    :param new_content: New content to write to the file.
-    """
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"The file {file_path} does not exist.")
+    target = resolve_in_root(path)
+    if target is None:
+        return outside_refusal(path)
+    if not target.is_file():
+        return f"Error: {path!r} is not an existing file."
 
-    with open(file_path, 'w') as file:
-        file.write(new_content)
+    try:
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"Error editing {path!r}: {exc}"
 
-    print(f"File {file_path} has been updated.")
+    return f"Updated {path} ({len(content)} characters)."

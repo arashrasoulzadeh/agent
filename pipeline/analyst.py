@@ -11,6 +11,10 @@ build on earlier answers without re-explaining the project.
 While the agent works, its tool calls and tool results are printed live
 as a gray "thinking" trace, so it's visible what it's inspecting before
 the final answer lands.
+
+When the agent is not confident and the project itself cannot settle the
+point, it uses the `ask` tool to put the question to the user and carries
+on from their answer rather than guessing.
 """
 
 from langchain.agents import create_agent

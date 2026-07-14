@@ -3,11 +3,10 @@
 import json
 import os
 from datetime import datetime
-from pathlib import Path
 
 from langchain_core.tools import tool
 
-from tools.guard import is_secret, refusal
+from tools.guard import is_secret, outside_refusal, refusal, resolve_in_root
 
 
 @tool
@@ -25,7 +24,9 @@ def metadata(path: str = ".") -> str:
         return json.dumps({"error": refusal(path)})
 
     try:
-        target = Path(path).expanduser().resolve()
+        target = resolve_in_root(path)
+        if target is None:
+            return json.dumps({"error": outside_refusal(path)})
 
         if not target.exists():
             return json.dumps({"error": "not_found", "path": str(target)})
