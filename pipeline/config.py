@@ -10,9 +10,9 @@ from dataclasses import dataclass
 @dataclass
 class PipelineConfig:
     # --- step toggles ---
-    collect: bool = True       # Stage 1: gather the private project map
-    analyze: bool = True       # Stage 2: reason and answer the query
-    synthesize: bool = True     # Stage 3: convert answer to AI-ready context
+    collect: bool = True  # Stage 1: gather the private project map
+    analyze: bool = True  # Stage 2: reason and answer the query
+    synthesize: bool = True  # Stage 3: convert answer to AI-ready context
 
     # --- step options ---
     analysis_temperature: float = 0.0

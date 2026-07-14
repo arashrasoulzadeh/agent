@@ -10,7 +10,7 @@ timestamped line in the log file (ANSI codes are never written to disk):
     response  magenta   raw LLM response
     question  yellow    the agent asking the user something
 
-Set COSIST_LOG to change the log file path, NO_COLOR to disable color, or
+Set AGENT_LOG to change the log file path, NO_COLOR to disable color, or
 FORCE_COLOR to keep color when stdout is not a terminal.
 """
 
@@ -30,7 +30,7 @@ BLUE = "\033[94m"
 MAGENTA = "\033[95m"
 YELLOW = "\033[93m"
 
-LOG_FILE = os.getenv("COSIST_LOG", "cosist.log")
+LOG_FILE = os.getenv("AGENT_LOG", "agent.log")
 
 _COLOR_ENABLED = bool(os.environ.get("FORCE_COLOR")) or (
     sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -43,7 +43,7 @@ def _get_logger() -> logging.Logger:
     """Build the file logger on first use."""
     global _logger
     if _logger is None:
-        logger = logging.getLogger("cosist")
+        logger = logging.getLogger("agent")
         logger.setLevel(logging.INFO)
         logger.propagate = False
         handler = logging.FileHandler(LOG_FILE, encoding="utf-8")

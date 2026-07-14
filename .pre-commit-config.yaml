@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      # Credentials must never reach the repo.
+      - id: detect-private-key
+      - id: check-case-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # .gitignore already covers these, but a forced add would slip past it.
+      - id: no-env-files
+        name: block committing env files
+        entry: env files must never be committed
+        language: fail
+        files: '(^|/)\.env($|\.)(?!example)'

@@ -1,17 +1,26 @@
-import os
+"""Filesystem `create_directory` tool."""
 
-def create_directory(directory_path: str) -> None:
-    """Creates a new directory if it does not exist."""
+from langchain_core.tools import tool
+
+from tools.guard import outside_refusal, resolve_in_root
+
+
+@tool
+def create_directory(path: str) -> str:
+    """Create a directory, and any missing parents, inside the project.
+
+    Args:
+        path: Directory to create, inside the project.
+    """
+    target = resolve_in_root(path)
+    if target is None:
+        return outside_refusal(path)
+    if target.is_dir():
+        return f"{path} already exists."
+
     try:
-        os.makedirs(directory_path, exist_ok=True)
-        print(f"Directory '{directory_path}' created successfully.")
-    except Exception as e:
-        print(f"Error creating directory '{directory_path}': {e}")
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"Error creating {path!r}: {exc}"
 
-if __name__ == '__main__':
-    import sys
-    if len(sys.argv) < 2:
-        print('Usage: python create_directory.py <directory_path>')
-        sys.exit(1)
-    directory = sys.argv[1]
-    create_directory(directory)
+    return f"Created directory {path}."
