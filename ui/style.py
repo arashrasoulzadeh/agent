@@ -1,4 +1,5 @@
-"""Literal Rich style strings shared by app.py, trace.py, and engine.py.
+"""Literal Rich style strings shared by app.py, trace.py, answer.py, and
+error.py.
 
 RichLog renders through Textual's own console rather than a Console we
 control, so styles here are literal color names instead of a registered
@@ -12,5 +13,3 @@ QUESTION = "bold bright_yellow"
 ERROR = "bold red"
 INFO = "grey62"
 BANNER = "bold bright_cyan"
-REQUEST = "bright_blue"
-RESPONSE = "bright_magenta"

@@ -1,13 +1,15 @@
 """Human-in-the-loop `ask` tool.
 
 Lets the agent put a question to the user mid-task and use the reply,
-instead of guessing when it is genuinely missing information.
+instead of guessing when it is genuinely missing information. Routed
+through `core.ask_context` rather than a specific transport, so this tool
+works the same whether it's a websocket server's room asking a connected
+client, a test, or nothing at all.
 """
 
 from langchain_core.tools import tool
 
-from ui import prompts
-from ui.engine import record
+from core import ask_context
 
 
 @tool
@@ -22,11 +24,10 @@ def ask(question: str) -> str:
     Args:
         question: The question to put to the user.
     """
-    reply = prompts.ask_user(question)
+    reply = ask_context.ask(question)
     if reply is None:
         return "The user did not answer. Proceed with your best judgement."
     if not reply:
         return "The user gave no answer. Proceed with your best judgement."
 
-    record("answer", reply)
     return reply

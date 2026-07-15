@@ -9,27 +9,36 @@ Two restrictions, both enforced here so every tool inherits them:
 2. Every path must resolve inside the project root. Relative paths are
    taken as relative to that root, and `..` and symlinks are resolved
    before the check, so neither can be used to step outside it.
+
+The root is a contextvar, not a plain global: the server can run several
+rooms concurrently, each analyzing a different project, each turn on its
+own worker thread. `asyncio.to_thread` copies the calling context into
+that new thread, so a root set *inside* one room's thread is invisible to
+every other room's thread — the same isolation `core/ask_context.py` uses
+for the `ask` tool.
 """
 
 import re
+from contextvars import ContextVar
 from fnmatch import fnmatch
 from pathlib import Path
 
 SECRET_PATTERNS = (".env", ".env.*")
 
-_project_root: Path | None = None
+_project_root: ContextVar[Path | None] = ContextVar("project_root", default=None)
 
 
 def set_project_root(path: str | Path) -> Path:
     """Pin the folder the agent is confined to. Called by the collector."""
-    global _project_root
-    _project_root = Path(path).expanduser().resolve()
-    return _project_root
+    root = Path(path).expanduser().resolve()
+    _project_root.set(root)
+    return root
 
 
 def project_root() -> Path:
     """The folder the agent is confined to; the cwd until one is pinned."""
-    return _project_root if _project_root is not None else Path.cwd().resolve()
+    root = _project_root.get()
+    return root if root is not None else Path.cwd().resolve()
 
 
 def is_secret(path: str | Path) -> bool:

@@ -1,33 +1,49 @@
 """Auto-discovery for agent-capability modules.
 
 Every `.py` file in modules/ (except `__init__.py` and anything starting
-with `_`) is imported automatically, and any langchain tool it defines at
-module level is collected. Dropping a new file in modules/ is enough to
-add a capability — nothing here or in modules/__init__.py needs editing.
+with `_`) is imported exactly once, and from it this collects:
 
-A module opts out of the agent's default toolset with a module-level
-`AGENT_TOOL = False` (see modules/delete.py, modules/metadata.py): its
-tool is still discovered and importable, just excluded from AGENT_TOOLS.
+  - any langchain tool defined at module level (the capability itself)
+  - an optional `MODULE` object implementing part or all of the
+    Lifecycle contract (core/module.py) — init()/start()/stop() hooks,
+    for a module with state to set up or tear down
+
+Dropping a new file in modules/ is enough to add either kind of
+capability — nothing here or in modules/__init__.py needs editing.
+
+A module opts a tool out of the agent's default toolset with a
+module-level `AGENT_TOOL = False` (see modules/delete.py,
+modules/metadata.py): its tool is still discovered and importable, just
+excluded from AGENT_TOOLS.
+
+MODULES_DIR/MODULES_PACKAGE are plain module attributes — tests point
+them at a temp directory the same way tests/stubs.py repoints
+server.rooms.ROOMS_DIR, rather than threading a parameter through.
 """
 
 import importlib
 import pkgutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
+
+from core.module import implements_lifecycle
 
 MODULES_PACKAGE = "modules"
 MODULES_DIR = Path(__file__).resolve().parent.parent / MODULES_PACKAGE
 
 
-def discover_tools() -> tuple[dict[str, BaseTool], list[BaseTool]]:
-    """Import every module under modules/ and collect its tools.
+@dataclass
+class Discovery:
+    all_tools: dict[str, BaseTool] = field(default_factory=dict)
+    agent_tools: list[BaseTool] = field(default_factory=list)
+    lifecycle_modules: list[object] = field(default_factory=list)
 
-    Returns (all_tools_by_name, agent_tools): the second is the first
-    filtered down to modules that didn't set AGENT_TOOL = False.
-    """
-    all_tools: dict[str, BaseTool] = {}
-    agent_tools: list[BaseTool] = []
+
+def discover() -> Discovery:
+    """Import every module under modules/ once and collect what it offers."""
+    result = Discovery()
 
     infos = sorted(pkgutil.iter_modules([str(MODULES_DIR)]), key=lambda m: m.name)
     for info in infos:
@@ -35,10 +51,21 @@ def discover_tools() -> tuple[dict[str, BaseTool], list[BaseTool]]:
             continue
         module = importlib.import_module(f"{MODULES_PACKAGE}.{info.name}")
         enabled = getattr(module, "AGENT_TOOL", True)
+
         for value in vars(module).values():
             if isinstance(value, BaseTool):
-                all_tools[value.name] = value
+                result.all_tools[value.name] = value
                 if enabled:
-                    agent_tools.append(value)
+                    result.agent_tools.append(value)
 
-    return all_tools, agent_tools
+        lifecycle_obj = getattr(module, "MODULE", None)
+        if lifecycle_obj is not None and implements_lifecycle(lifecycle_obj):
+            result.lifecycle_modules.append(lifecycle_obj)
+
+    return result
+
+
+def discover_tools() -> tuple[dict[str, BaseTool], list[BaseTool]]:
+    """Back-compat convenience: (all_tools_by_name, agent_tools) only."""
+    result = discover()
+    return result.all_tools, result.agent_tools

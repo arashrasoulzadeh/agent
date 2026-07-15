@@ -1,5 +1,14 @@
-"""LangChain callback that logs each LLM call's raw request and response."""
+"""LangChain callback that logs each LLM call's raw request and response.
 
+This runs wherever the LLM does — the server process — so it logs
+through the standard `logging` module rather than a UI: there's no
+`ui` to report through anymore now that the client is a separate process
+talking over a socket. Set AGENT_VERBOSE=1 to also print these lines
+(server/app.py configures logging for the whole process).
+"""
+
+import logging
+import os
 from typing import Any
 from uuid import UUID
 
@@ -7,7 +16,10 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import LLMResult
 
-from ui.engine import preview, request, response
+from core.text import preview
+
+logger = logging.getLogger("llm")
+_verbose = bool(os.environ.get("AGENT_VERBOSE"))
 
 
 def _format_messages(messages: list[BaseMessage]) -> str:
@@ -36,7 +48,7 @@ class RawIOLogger(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         for batch in messages:
-            request(f"  ⇢ llm request: {_format_messages(batch)}")
+            self._log(f"⇢ llm request: {_format_messages(batch)}")
 
     def on_llm_end(self, resp: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         for generations in resp.generations:
@@ -49,4 +61,9 @@ class RawIOLogger(BaseCallbackHandler):
                     text = ", ".join(
                         f"{c['name']}({c['args']})" for c in msg.tool_calls
                     )
-                response(f"  ⇠ llm response: {preview(text)}")
+                self._log(f"⇠ llm response: {preview(text)}")
+
+    def _log(self, message: str) -> None:
+        logger.info(message)
+        if _verbose:
+            print(f"  {message}")
