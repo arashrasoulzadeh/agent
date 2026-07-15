@@ -1,18 +1,19 @@
 # Agent protocol
 
 Every feature of the agent is served through one connection to the
-server, addressed generically as a `Transport` (`server/transport.py`) —
-today that's WebSocket, the only transport implemented so far, but
-nothing about the protocol below or the server's core (`server/rooms.py`,
-`server/routes.py`, `server/events.py`) is WebSocket-specific. This
-document is the contract: if you're writing a client (a GUI, a script,
-anything other than `cli.py`), or a new transport adapter, this is
-everything you need.
+server, addressed generically as a `Transport`
+(`infrastructure/transport/base.py`) — today that's WebSocket, the only
+transport implemented so far, but nothing about the protocol below or
+the server's core (`application/rooms.py`, `interfaces/ws/routes.py`,
+`interfaces/ws/events.py`) is WebSocket-specific. This document is the
+contract: if you're writing a client (a GUI, a script, anything other
+than `cli.py`), or a new transport adapter, this is everything you need.
 
 ## Running the server
 
 ```bash
-python -m server
+agent-server
+# or: python -m interfaces.ws
 ```
 
 Listens on `ws://127.0.0.1:8765` by default. Override with the
@@ -22,13 +23,13 @@ freestanding process, not tied to any client's lifetime: it keeps running
 else is currently connected, so a second client can attach to an
 in-progress conversation, or a different client entirely can resume a
 saved one later. `cli.py` only checks whether one is already listening
-and tells you to start it if not (`server/discovery.py`) — it never
-spawns the server itself.
+and tells you to start it if not (`interfaces/ws/discovery.py`) — it
+never spawns the server itself.
 
 ## Transports: WebSocket today, more later without touching the protocol
 
-`server/transport.py` defines one interface everything above the wire
-format depends on:
+`infrastructure/transport/base.py` defines one interface everything
+above the wire format depends on:
 
 ```python
 class Transport(ABC):
@@ -37,23 +38,25 @@ class Transport(ABC):
     def is_open(self) -> bool: ...
 ```
 
-`WebSocketTransport` (also in `server/transport.py`) is the only
-implementation today, and `server/app.py` is the only file that imports
-`websockets` on the delivery side — it accepts raw connections, wraps
-each in a `WebSocketTransport`, and hands that to `server/routes.py`.
-`Room` (`server/rooms.py`) holds a `set[Transport]` of whoever's
-subscribed and broadcasts through `server/events.py`'s `broadcast()`,
-which calls `transport.send(...)` — never anything WebSocket-specific.
+`WebSocketTransport` (`infrastructure/transport/websocket.py`) is the
+only implementation today, and `interfaces/ws/app.py` is the only file
+that imports `websockets` on the delivery side — it accepts raw
+connections, wraps each in a `WebSocketTransport`, and hands that to
+`interfaces/ws/routes.py`. `Room` (`application/rooms.py`) holds a
+`set[Transport]` of whoever's subscribed and broadcasts through
+`interfaces/ws/events.py`'s `broadcast()`, which calls
+`transport.send(...)` — never anything WebSocket-specific.
 
-Adding REST or gRPC later means writing one new adapter — a
-`RestTransport`/`GrpcTransport` implementing `send()`/`is_open`, plus its
-own accept loop (a sibling to `server/app.py`'s `handle()`) that decodes
-its own wire format into the same request envelope below and calls the
-same `server/routes.py` handlers. Nothing in `rooms.py`, `routes.py`, or
-`events.py` changes. `tests/test_transport.py` proves this concretely: it
-runs `events.broadcast()` against a second, deliberately non-WebSocket
-`Transport` implementation to confirm the core never assumes which one
-it's talking to.
+Adding REST or gRPC later means writing one new adapter next to
+`websocket.py` — a `RestTransport`/`GrpcTransport` implementing
+`send()`/`is_open`, plus its own accept loop (a sibling to
+`interfaces/ws/app.py`'s `handle()`) that decodes its own wire format
+into the same request envelope below and calls the same
+`interfaces/ws/routes.py` handlers. Nothing in `rooms.py`, `routes.py`,
+or `events.py` changes. `tests/test_transport.py` proves this
+concretely: it runs `events.broadcast()` against a second, deliberately
+non-WebSocket `Transport` implementation to confirm the core never
+assumes which one it's talking to.
 
 ## Message shapes
 
@@ -116,7 +119,7 @@ clients open on the same room see the same conversation as it happens).
 | `tokens` | `{prompt, completion, total}` | Usage updated after an LLM call. |
 | `question` | `{text}` | The agent's own mid-turn question (the `ask` tool). Answer it with `/reply`; `session.state.awaiting_reply` is `true` until then. |
 | `answer` | `{text}` | The turn's final answer, markdown. |
-| `error` | `{message}` | A turn failed. Already mapped from the exception type to a plain-English line (see `server/errors.py`) — nothing further to translate client-side. |
+| `error` | `{message}` | A turn failed. Already mapped from the exception type to a plain-English line (see `interfaces/ws/errors.py`) — nothing further to translate client-side. |
 
 ## Rooms and persistence
 
@@ -169,5 +172,6 @@ connect ws://127.0.0.1:8765
   <- {"event": "answer", "room": "3c9e...", "data": {"text": "..."}}
 ```
 
-`cli.py`/`ui/app.py` is exactly this client, with a Textual UI on top —
-read it alongside this document for a concrete implementation.
+`cli.py`/`interfaces/cli/app.py` is exactly this client, with a Textual
+UI on top — read it alongside this document for a concrete
+implementation.

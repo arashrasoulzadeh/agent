@@ -12,8 +12,8 @@ from pathlib import Path
 
 import websockets
 
-from server import app as server_app
-from server import rooms
+from application import rooms
+from interfaces.ws import app as server_app
 
 
 class StubAnalyst:
@@ -31,12 +31,12 @@ class StubAnalyst:
 class StubPipeline:
     """Returns canned, instant text for any question.
 
-    Accepts (and ignores) the same keyword arguments Room passes to a
-    real ProjectPipeline — events, tools, collector — so Room's wiring
-    doesn't need a special case for tests; only `sink` is actually used.
+    Constructed from just a sink (see `_wrap_as_factory` below) — never
+    touches `infrastructure.llm.get_llm()` or any other network/API-key
+    dependent wiring, unlike `application.rooms.default_pipeline_factory`.
     """
 
-    def __init__(self, sink, **_ignored):
+    def __init__(self, sink):
         self.sink = sink
         self.analyst = StubAnalyst()
         self.context = None
@@ -92,7 +92,7 @@ class SlowPipeline(StubPipeline):
 class FailingPipeline:
     """A pipeline whose project load always fails."""
 
-    def __init__(self, sink, **_ignored):
+    def __init__(self, sink):
         self.sink = sink
         self.analyst = StubAnalyst()
 
@@ -103,15 +103,27 @@ class FailingPipeline:
         raise AssertionError("should never be reached")
 
 
+def _wrap_as_factory(pipeline_cls):
+    """Adapt a stub pipeline class (constructed from just a sink) to the
+    `(config, events, room) -> pipeline` shape `Room` actually calls,
+    using the real `RoomSink` so tool-call/tool-result/tokens still
+    broadcast through the room exactly like a real pipeline's would."""
+
+    def factory(config, events, room):
+        return pipeline_cls(rooms.RoomSink(room))
+
+    return factory
+
+
 @asynccontextmanager
 async def running_server(pipeline_factory=StubPipeline):
     """A real websockets server on an OS-assigned port, backed by a temp
-    rooms/ directory and the given (stub) pipeline factory. Yields the
+    rooms/ directory and the given (stub) pipeline class. Yields the
     ws:// URI to connect to."""
     original_factory = rooms.pipeline_factory
     original_dir = rooms.ROOMS_DIR
     rooms.ROOMS.clear()
-    rooms.pipeline_factory = pipeline_factory
+    rooms.pipeline_factory = _wrap_as_factory(pipeline_factory)
     tmp_rooms = Path(tempfile.mkdtemp()) / "rooms"
     rooms.ROOMS_DIR = tmp_rooms
     try:

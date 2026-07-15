@@ -1,15 +1,16 @@
-"""Tests for server/lifecycle.py: init/start/stop hook orchestration —
-one module's failing hook must not stop another module's from running.
+"""Tests for interfaces/ws/lifecycle.py: init/start/stop hook
+orchestration — one module's failing hook must not stop another module's
+from running.
 
 The real subprocess-level behavior (a running server actually calling
 these on startup and on SIGINT/SIGTERM) was also verified manually by
-spawning `python -m server` and sending it a real SIGTERM; that's not
+spawning `agent-server` and sending it a real SIGTERM; that's not
 repeated here as an automated test since it needs a real OS process.
 """
 
 import unittest
 
-from server import lifecycle
+from interfaces.ws import lifecycle
 
 
 class RecordingModule:

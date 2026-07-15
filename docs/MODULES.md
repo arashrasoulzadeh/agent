@@ -37,8 +37,9 @@ def word_count(path: str) -> str:
 That's the whole thing. `core/registry.py` imports every file under
 `modules/` (except `__init__.py` and anything starting with `_`), finds
 any LangChain `@tool` defined at module level, and includes it in
-`AGENT_TOOLS` — the list `server/rooms.py` hands to the analyst. Nothing
-in `modules/__init__.py`, `core/registry.py`, or anywhere else needs to
+`AGENT_TOOLS` — the list `application/rooms.py`'s
+`default_pipeline_factory` hands to the analyst. Nothing in
+`modules/__init__.py`, `core/registry.py`, or anywhere else needs to
 change.
 
 A few things worth matching from the existing tools (see `modules/ls.py`,
@@ -66,15 +67,16 @@ AGENT_TOOL = False
 
 ## How a result reaches the client, without this file knowing
 
-A tool's return value becomes a LangChain `ToolMessage`. `pipeline/analyst.py`
-reports it to whatever `Sink` it was given (`pipeline/sink.py`) — in the
-real server, that's `server/rooms.py`'s `RoomSink`, which turns it into a
-`tool.result` protocol event and broadcasts it through every subscribed
-`Transport` (`server/transport.py`). A module never imports `server/`,
-never touches a `Transport`, and works identically whether the room is
-being watched over WebSocket today or REST/gRPC later — that's the whole
-point of the transport-agnostic boundary. See `docs/PROTOCOL.md` for the
-wire format your tool's output ends up in.
+A tool's return value becomes a LangChain `ToolMessage`. `domain/analyst.py`
+reports it to whatever `Sink` it was given (`domain/sink.py`) — in the
+real server, that's `application/rooms.py`'s `RoomSink`, which turns it
+into a `tool.result` protocol event and broadcasts it through every
+subscribed `Transport` (`infrastructure/transport/base.py`). A module
+never imports `application/` or `interfaces/`, never touches a
+`Transport`, and works identically whether the room is being watched
+over WebSocket today or REST/gRPC later — that's the whole point of the
+transport-agnostic boundary. See `docs/PROTOCOL.md` for the wire format
+your tool's output ends up in.
 
 ## The optional half: lifecycle hooks
 
@@ -129,7 +131,7 @@ def fetch_url(url: str) -> str:
 
 `core/registry.py` discovers `MODULE` via `hasattr`, not `isinstance` —
 implementing only `stop()` (say, to flush a cache on shutdown) is exactly
-as valid as implementing all three. `server/app.py` calls every
+as valid as implementing all three. `interfaces/ws/app.py` calls every
 discovered module's `init(config)` then `start()` before accepting
 connections, and `stop()` once on graceful shutdown (SIGINT/SIGTERM). One
 module's hook raising is logged and skipped — it can't stop another

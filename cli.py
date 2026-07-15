@@ -1,21 +1,23 @@
 """Command-line interface: a thin WebSocket client.
 
 Connects to an agent server that is already running as its own process
-(`python -m server`). If nothing answers on the configured host:port, it
-prints how to start one and exits — it never spawns the server itself, so
-the server's lifecycle stays independent of any client.
+(`agent-server`, or `python -m interfaces.ws`). If nothing answers on the
+configured host:port, it prints how to start one and exits — it never
+spawns the server itself, so the server's lifecycle stays independent of
+any client.
 
-Once connected, it hands off to the full-screen TUI (ui/app.py), which
-creates or resumes a room and renders whatever the server reports.
+Once connected, it hands off to the full-screen TUI
+(interfaces/cli/app.py), which creates or resumes a room and renders
+whatever the server reports.
 """
 
 import argparse
 import asyncio
 import sys
 
-from server import discovery
-from server.config import HOST, PORT
-from ui.app import AgentApp
+from interfaces.cli.app import AgentApp
+from interfaces.ws import discovery
+from interfaces.ws.config import HOST, PORT
 
 
 def main(argv: list[str] | None = None) -> None:

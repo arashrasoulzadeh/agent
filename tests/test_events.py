@@ -1,11 +1,11 @@
-"""Tests for pipeline/events.py's StageEventBus in isolation — subscribe,
+"""Tests for domain/events.py's StageEventBus in isolation — subscribe,
 unsubscribe, partial observers, and that one observer raising doesn't
 break the bus or stop other observers from being notified.
 """
 
 import unittest
 
-from pipeline.events import LoggingStageObserver, StageEventBus
+from domain.events import LoggingStageObserver, StageEventBus
 
 
 class TestStageEventBus(unittest.TestCase):

@@ -6,7 +6,7 @@ parameter. A contextvar solves that without `modules` depending on
 `server` (which itself depends on `pipeline`, which depends on `modules` —
 a cycle if the dependency ran the other way).
 
-`server/rooms.py` sets the asker from *inside* the worker thread that runs
+`application/rooms.py` sets the asker from *inside* the worker thread that runs
 one room's turn (see its use of `asyncio.to_thread`, which copies the
 calling context into the new thread): setting it there, rather than
 before dispatching to the thread, keeps each concurrently running room's

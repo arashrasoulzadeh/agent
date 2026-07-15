@@ -1,5 +1,5 @@
-"""Tests for the Transport interface (server/transport.py) and
-server/events.py's broadcast().
+"""Tests for the Transport interface (infrastructure/transport/base.py)
+and interfaces/ws/events.py's broadcast().
 
 The InMemoryTransport here is a second, deliberately non-WebSocket
 implementation — proving events.broadcast()/Room only ever depend on the
@@ -11,8 +11,9 @@ import asyncio
 import unittest
 from typing import Any
 
-from server import events
-from server.transport import Transport, WebSocketTransport
+from infrastructure.transport.base import Transport
+from infrastructure.transport.websocket import WebSocketTransport
+from interfaces.ws import events
 
 
 class InMemoryTransport(Transport):

@@ -18,7 +18,7 @@ excluded from AGENT_TOOLS.
 
 MODULES_DIR/MODULES_PACKAGE are plain module attributes — tests point
 them at a temp directory the same way tests/stubs.py repoints
-server.rooms.ROOMS_DIR, rather than threading a parameter through.
+application.rooms.ROOMS_DIR, rather than threading a parameter through.
 """
 
 import importlib

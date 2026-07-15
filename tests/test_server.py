@@ -11,7 +11,7 @@ import uuid
 
 import websockets
 
-from server import rooms
+from application import rooms
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
