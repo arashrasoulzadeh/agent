@@ -20,20 +20,28 @@ on from their answer rather than guessing.
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, ToolMessage
 
-from helpers import get_llm, preview, think
+from helpers import get_llm
+from modules import AGENT_TOOLS
 from pipeline.context import ProjectContext
 from pipeline.prompts import SYSTEM_PROMPT, context_message
-from tools import AGENT_TOOLS
+from ui import trace
 
 
 def _log_step(message) -> None:
-    """Print a gray trace line for a tool call or tool result."""
-    if isinstance(message, AIMessage) and message.tool_calls:
+    """Trace a tool call or tool result as the agent works."""
+    if isinstance(message, AIMessage):
+        usage = message.usage_metadata
+        if usage:
+            trace.tokens.add(
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                usage.get("total_tokens", 0),
+            )
         for call in message.tool_calls:
             args = ", ".join(f"{k}={v!r}" for k, v in call["args"].items())
-            think(f"  → {call['name']}({args})")
+            trace.tool_call(call["name"], args)
     elif isinstance(message, ToolMessage):
-        think(f"  ← {preview(message.content)}")
+        trace.tool_result(message.content)
 
 
 class ProjectAnalyst:

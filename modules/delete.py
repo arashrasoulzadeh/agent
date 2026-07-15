@@ -1,18 +1,21 @@
 """Filesystem `delete` tool.
 
-Not in AGENT_TOOLS: deletion is destructive and irreversible, so it stays
-opt-in rather than something the agent can reach for on its own.
+Deletion is destructive and irreversible, so it stays opt-in rather than
+something the agent can reach for on its own: AGENT_TOOL = False keeps it
+out of AGENT_TOOLS while still leaving it importable directly.
 """
 
 from langchain_core.tools import tool
 
-from tools.guard import (
+from core.guard import (
     is_secret,
     outside_refusal,
     project_root,
     refusal,
     resolve_in_root,
 )
+
+AGENT_TOOL = False
 
 
 @tool

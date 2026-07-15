@@ -2,7 +2,7 @@
 
 from langchain_core.tools import tool
 
-from tools.guard import outside_refusal, resolve_in_root
+from core.guard import outside_refusal, resolve_in_root
 
 
 @tool

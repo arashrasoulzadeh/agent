@@ -7,7 +7,8 @@ no reasoning and talks to no LLM.
 
 from dataclasses import dataclass
 
-from tools import metadata, set_project_root
+from core.guard import set_project_root
+from modules import metadata
 
 
 @dataclass

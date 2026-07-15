@@ -1,4 +1,8 @@
-"""Filesystem metadata tool."""
+"""Filesystem metadata tool.
+
+Not in AGENT_TOOLS: this is the collector's preprocessing tool, and its
+output already reaches the agent as the project map in the system prompt.
+"""
 
 import json
 import os
@@ -6,7 +10,9 @@ from datetime import datetime
 
 from langchain_core.tools import tool
 
-from tools.guard import is_secret, outside_refusal, refusal, resolve_in_root
+from core.guard import is_secret, outside_refusal, refusal, resolve_in_root
+
+AGENT_TOOL = False
 
 
 @tool

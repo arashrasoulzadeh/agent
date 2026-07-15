@@ -2,7 +2,7 @@
 
 from langchain_core.tools import tool
 
-from tools.guard import is_secret, outside_refusal, refusal, resolve_in_root
+from core.guard import is_secret, outside_refusal, refusal, resolve_in_root
 
 
 @tool

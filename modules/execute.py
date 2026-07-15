@@ -11,7 +11,7 @@ import subprocess
 
 from langchain_core.tools import tool
 
-from tools.guard import escapes_root, mentions_secret, project_root
+from core.guard import escapes_root, mentions_secret, project_root
 
 
 @tool

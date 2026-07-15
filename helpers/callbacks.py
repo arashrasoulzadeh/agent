@@ -7,11 +7,21 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import LLMResult
 
-from helpers.console import preview, request, response
+from ui.engine import preview, request, response
 
 
 def _format_messages(messages: list[BaseMessage]) -> str:
-    return " | ".join(f"{m.type}={preview(m.content)}" for m in messages)
+    # The system message carries the private project map (the metadata
+    # tool's output) and is resent on every single call — showing its
+    # content here would just repeat internal, agent-only context back
+    # at the user on every verbose request line for no benefit.
+    parts = [
+        f"{m.type}=<private project context, {len(str(m.content))} chars>"
+        if m.type == "system"
+        else f"{m.type}={preview(m.content)}"
+        for m in messages
+    ]
+    return " | ".join(parts)
 
 
 class RawIOLogger(BaseCallbackHandler):

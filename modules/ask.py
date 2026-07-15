@@ -6,7 +6,8 @@ instead of guessing when it is genuinely missing information.
 
 from langchain_core.tools import tool
 
-from helpers import console
+from ui import prompts
+from ui.engine import record
 
 
 @tool
@@ -21,15 +22,11 @@ def ask(question: str) -> str:
     Args:
         question: The question to put to the user.
     """
-    console.question(f"  ? {question}")
-    try:
-        reply = input("  your answer > ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
+    reply = prompts.ask_user(question)
+    if reply is None:
         return "The user did not answer. Proceed with your best judgement."
-
     if not reply:
         return "The user gave no answer. Proceed with your best judgement."
 
-    console.record("answer", reply)
+    record("answer", reply)
     return reply
