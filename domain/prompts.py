@@ -4,7 +4,7 @@ Keeping prompt text in one place makes it easy to tune the agent's
 behaviour without touching the pipeline wiring.
 """
 
-from pipeline.context import ProjectContext
+from domain.context import ProjectContext
 
 SYSTEM_PROMPT = """\
 You are a senior software engineer acting as a project analyst, answering

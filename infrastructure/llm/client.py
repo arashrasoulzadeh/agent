@@ -4,7 +4,7 @@ import os
 
 from langchain_openai import ChatOpenAI
 
-from helpers.callbacks import RawIOLogger
+from infrastructure.llm.callbacks import RawIOLogger
 
 
 def get_llm(temperature: float = 0, log_raw_io: bool = True) -> ChatOpenAI:

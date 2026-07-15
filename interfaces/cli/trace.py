@@ -9,7 +9,7 @@ needed to touch a widget.
 from rich.text import Text
 
 from core.text import preview
-from ui import style
+from interfaces.cli import style
 
 
 def tool_call(app, name: str, args: str) -> None:

@@ -12,7 +12,7 @@ never got called (see server/app.py's `finally` block) — a module's
 import logging
 from typing import Any
 
-logger = logging.getLogger("server.lifecycle")
+logger = logging.getLogger("interfaces.ws.lifecycle")
 
 
 def init_all(modules_list: list[Any], config: dict[str, Any]) -> None:

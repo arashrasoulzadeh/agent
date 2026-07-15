@@ -3,11 +3,11 @@ whatever order `PipelineConfig` specifies, into one flow.
 
 Stages are async by contract — a uniform interface that leaves room for
 a future stage doing real async I/O — even though today's concrete
-stages (pipeline/stages.py) wrap synchronous work: collection is a
+stages (domain/stages.py) wrap synchronous work: collection is a
 filesystem walk, analysis and synthesis are synchronous LangChain calls.
-They run inside the one worker thread server/rooms.py already dedicates
+They run inside the one worker thread application/rooms.py already dedicates
 to a turn (via `asyncio.run()` inside that thread — see
-ProjectPipeline.ask() in pipeline/__init__.py), so blocking here does not
+ProjectPipeline.ask() in domain/__init__.py), so blocking here does not
 stall the server's own event loop.
 
 Cancellation is checked *between* stages, not inside one. Python cannot
@@ -21,10 +21,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pipeline.context import ProjectContext
+from domain.context import ProjectContext
 
 if TYPE_CHECKING:
-    from pipeline.events import StageEventBus
+    from domain.events import StageEventBus
 
 
 @dataclass
@@ -48,7 +48,7 @@ class PipelineCancelled(Exception):
 @dataclass
 class PipelineContext:
     """Per-run state: cancellation, and an optional event bus stage
-    lifecycle is reported to (see pipeline/events.py). Both are opt-in —
+    lifecycle is reported to (see domain/events.py). Both are opt-in —
     a bare `PipelineContext()` has no observers and cannot be cancelled,
     so using the observer pattern costs nothing when nobody needs it."""
 

@@ -9,12 +9,16 @@ client: requests use a `route` (e.g. `/prompt`), pushes use an `event`
     events.py     server -> client pushes (kept separate from routes, so
                   "things a client can ask for" and "things the server
                   reports" don't tangle into one file)
-    rooms.py      Room: one project session, its pipeline, and its
-                  persistence to rooms/{uuid}.json
     app.py        the actual server loop: accepts connections, dispatches
                   requests to routes.py, keeps clients subscribed to rooms
-    discovery.py  is a server already listening? spawn one if not.
+    discovery.py  is a server already listening? `cli.py` only checks —
+                  it never spawns one itself.
 
-Run standalone with `python -m server`; `cli.py` spawns it automatically
-if nothing is listening on the configured host:port yet.
+`Room` — one project session, its pipeline, and its persistence to
+rooms/{uuid}.json — lives in application/rooms.py, not here: it's the
+use-case layer this package's routes/events talk to, not part of the
+delivery mechanism itself.
+
+Run standalone with the `agent-server` console script, or
+`python -m interfaces.ws` directly.
 """

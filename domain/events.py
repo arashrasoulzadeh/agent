@@ -2,11 +2,11 @@
 
 This decouples stage execution from whoever needs to react to it — a
 structured logger, a future metrics collector, anything else — without
-`Pipeline`/`Stage` (pipeline/stage.py) knowing any of them exist. It is
+`Pipeline`/`Stage` (domain/stage.py) knowing any of them exist. It is
 deliberately *not* used for the high-frequency, fine-grained tool
 call/result/token reporting that happens *inside* one stage (the
 analyze stage's tool-calling loop) — that already has a simpler, more
-direct channel in `Sink` (pipeline/sink.py), and forcing the observer
+direct channel in `Sink` (domain/sink.py), and forcing the observer
 pattern on top of it would just be indirection with no one new listening.
 Stage-level lifecycle is different: several independent things
 plausibly want to know "a stage started/finished" (a broadcaster, a
@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from pipeline.stage import Turn
+    from domain.stage import Turn
 
 
 class StageObserver(Protocol):
@@ -43,7 +43,7 @@ class StageEventBus:
 
     def __init__(self) -> None:
         self._observers: list[StageObserver] = []
-        self._logger = logging.getLogger("pipeline.events")
+        self._logger = logging.getLogger("domain.events")
 
     def subscribe(self, observer: StageObserver) -> None:
         self._observers.append(observer)
@@ -78,7 +78,7 @@ class LoggingStageObserver:
     a concrete, genuinely decoupled use of the bus: Pipeline and Stage
     never call `logging` themselves."""
 
-    def __init__(self, logger_name: str = "pipeline.stage") -> None:
+    def __init__(self, logger_name: str = "domain.stage") -> None:
         self._logger = logging.getLogger(logger_name)
         self._started_at: dict[int, float] = {}
 

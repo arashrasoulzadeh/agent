@@ -1,12 +1,16 @@
 """Rooms: one per project session, persisted to rooms/{uuid}.json.
 
-A Room owns a ProjectPipeline, the set of `Transport`s (server/transport.py)
-currently subscribed to it, turn/awaiting-reply state, and the queue the
-`ask` tool blocks on for its reply. Every turn reports through a Sink
-(pipeline/sink.py) that broadcasts protocol events through those
-transports instead of touching a renderer directly, and every change — a
-new message, a tool call, a token update — is written to disk immediately,
-so a room can be resumed later even if the server restarts in between.
+A Room owns a ProjectPipeline, the set of `Transport`s
+(infrastructure/transport/base.py) currently subscribed to it,
+turn/awaiting-reply state, and the queue the `ask` tool blocks on for its
+reply. Every turn reports through a Sink (domain/sink.py) that broadcasts
+protocol events through those transports instead of touching a renderer
+directly, and every change — a new message, a tool call, a token update —
+is saved via `RoomRepository`
+(infrastructure/persistence/room_repository.py) immediately, so a room
+can be resumed later even if the server restarts in between. Room builds
+its own payload dict — that's its own state, not a persistence detail —
+the repository just writes/reads it.
 
 Room never imports `websockets` or anything else transport-specific — it
 only knows `Transport.send()`. That's the boundary requirement 1 asks
@@ -21,7 +25,6 @@ a different project, potentially — stay isolated from one another.
 """
 
 import asyncio
-import json
 import os
 import queue
 import uuid as uuid_lib
@@ -36,13 +39,18 @@ from langchain_core.messages import (
 )
 
 from core import ask_context, guard
+from domain import ProjectPipeline
+from domain.analyst import ProjectAnalyst
+from domain.config import PipelineConfig
+from domain.context import ContextCollector
+from domain.events import LoggingStageObserver, StageEventBus
+from domain.synthesizer import ContextSynthesizer
+from infrastructure.llm import get_llm
+from infrastructure.persistence.room_repository import RoomRepository
+from infrastructure.transport.base import Transport
+from interfaces.ws import events
+from interfaces.ws.errors import friendly
 from modules import AGENT_TOOLS, metadata
-from pipeline import ProjectPipeline
-from pipeline.context import ContextCollector
-from pipeline.events import LoggingStageObserver, StageEventBus
-from server import events
-from server.errors import friendly
-from server.transport import Transport
 
 TOOL_NAMES = [tool.name for tool in AGENT_TOOLS]
 
@@ -60,11 +68,41 @@ BOOTSTRAP_QUERY = (
 # without reloading it from disk.
 ROOMS: dict[str, "Room"] = {}
 
-# A seam for tests: swap in a pipeline that never touches the network
-# (see tests/test_server.py) instead of a real ProjectPipeline, which
-# builds a real LLM client — and needs a real API key — the moment it's
-# constructed.
-pipeline_factory = ProjectPipeline
+def default_pipeline_factory(
+    config: PipelineConfig, events: StageEventBus, room: "Room"
+) -> ProjectPipeline:
+    """Wire the agent's concrete toolset, metadata source, and LLM into
+    domain/ — ProjectAnalyst, ContextSynthesizer, and ContextCollector all
+    take these as injected parameters instead of importing modules/ or
+    infrastructure/ themselves, so domain/ stays reusable and
+    dependency-free of both."""
+    return ProjectPipeline(
+        config=config,
+        events=events,
+        analyst=ProjectAnalyst(
+            llm=get_llm(config.analysis_temperature),
+            sink=RoomSink(room),
+            tools=AGENT_TOOLS,
+        ),
+        synthesizer=ContextSynthesizer(
+            llm=get_llm(config.synthesis_temperature),
+            fmt=config.synthesis_format,
+        ),
+        # metadata is a langchain BaseTool (needs a dict arg); adapt it to
+        # ContextCollector's plain Callable[[str], str] contract.
+        collector=ContextCollector(
+            metadata_fn=lambda path: metadata.invoke({"path": path})
+        ),
+    )
+
+
+# A seam for tests: swap in a factory that never touches the network (see
+# tests/test_server.py / tests/stubs.py) instead of default_pipeline_factory,
+# which builds a real LLM client — and needs a real API key — the moment
+# it's called. Room calls this as a single unit so tests don't have to
+# pass through a real get_llm() call just because they only want to stub
+# out the pipeline.
+pipeline_factory = default_pipeline_factory
 
 
 def _now() -> str:
@@ -111,23 +149,15 @@ class Room:
         self.transcript: list[dict[str, Any]] = []
         self.reply_queue: queue.Queue[str] = queue.Queue()
 
-        # This is the one place the agent's concrete toolset and metadata
-        # source get wired into pipeline/ — pipeline/analyst.py and
-        # pipeline/context.py both take them as injected parameters
-        # instead of importing modules/ themselves, so pipeline/ stays
-        # reusable without any specific tool list.
+        # Fresh each time, reading whatever ROOMS_DIR currently is — this
+        # is what lets tests/stubs.py's `rooms.ROOMS_DIR = tmp_dir`
+        # monkeypatch (set *before* constructing any Room) keep working.
+        self.repo = RoomRepository(ROOMS_DIR)
+
         self.events = StageEventBus()
-        self.events.subscribe(LoggingStageObserver(f"pipeline.stage.room.{room_id}"))
-        self.pipeline = pipeline_factory(
-            sink=RoomSink(self),
-            events=self.events,
-            tools=AGENT_TOOLS,
-            # metadata is a langchain BaseTool (needs a dict arg); adapt it
-            # to ContextCollector's plain Callable[[str], str] contract.
-            collector=ContextCollector(
-                metadata_fn=lambda path: metadata.invoke({"path": path})
-            ),
-        )
+        self.events.subscribe(LoggingStageObserver(f"domain.stage.room.{room_id}"))
+        config = PipelineConfig()
+        self.pipeline = pipeline_factory(config, self.events, self)
 
     # ---- construction / persistence ----------------------------------
 
@@ -149,11 +179,10 @@ class Room:
         if room_id in ROOMS:
             return ROOMS[room_id]
 
-        file = ROOMS_DIR / f"{room_id}.json"
-        if not file.exists():
+        raw = RoomRepository(ROOMS_DIR).load(room_id)
+        if raw is None:
             return None
 
-        raw = json.loads(file.read_text(encoding="utf-8"))
         room = cls(raw["id"], raw["path"], loop)
         room.tokens = raw.get("tokens", room.tokens)
         room.created_at = raw.get("created_at", room.created_at)
@@ -164,32 +193,16 @@ class Room:
 
     @classmethod
     def list_saved(cls) -> list[dict[str, Any]]:
-        if not ROOMS_DIR.exists():
-            return []
-        rooms = []
-        for file in ROOMS_DIR.glob("*.json"):
-            try:
-                raw = json.loads(file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            rooms.append(
-                {
-                    "id": raw.get("id", file.stem),
-                    "path": raw.get("path"),
-                    "updated_at": raw.get("updated_at"),
-                }
-            )
-        return sorted(rooms, key=lambda r: r["updated_at"] or "", reverse=True)
+        return RoomRepository(ROOMS_DIR).list_saved()
 
     def save(self) -> None:
-        """Write this room's full state to disk, atomically.
+        """Save this room's full state, atomically.
 
         Called after every message, tool call, and token update — not
         just at the end of a turn — so a crash mid-turn loses as little
         as possible.
         """
         self.updated_at = _now()
-        ROOMS_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
             "id": self.id,
             "path": self.path,
@@ -206,10 +219,7 @@ class Room:
             ),
             "transcript": self.transcript,
         }
-        target = ROOMS_DIR / f"{self.id}.json"
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, target)
+        self.repo.save(self.id, payload)
 
     def append_transcript(self, entry: dict[str, Any]) -> None:
         self.transcript.append({**entry, "ts": _now()})

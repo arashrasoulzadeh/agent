@@ -1,9 +1,10 @@
 """The WebSocket transport adapter: accept raw connections, wrap each in
 a WebSocketTransport, and dispatch its requests to routes.py.
 
-This file — along with server/transport.py's WebSocketTransport — is the
-*only* WebSocket-specific code in the delivery path. `routes.py`,
-`rooms.py`, and `events.py` only ever see a `Transport`; a REST or gRPC
+This file — along with infrastructure/transport/websocket.py's
+WebSocketTransport — is the *only* WebSocket-specific code in the
+delivery path. `routes.py`,
+`application/rooms.py`, and `events.py` only ever see a `Transport`; a REST or gRPC
 adapter would be a sibling module here (its own accept loop, its own
 Transport subclass), never a change to any of those three.
 
@@ -24,15 +25,16 @@ import signal
 
 import websockets
 
+from application import rooms
+from infrastructure.transport.websocket import WebSocketTransport
+from interfaces.ws import lifecycle
+from interfaces.ws.config import HOST, PORT
+from interfaces.ws.protocol import ProtocolError, Request, error_response, response
+from interfaces.ws.routes import ROUTES
 from modules import LIFECYCLE_MODULES
-from server import lifecycle, rooms
-from server.config import HOST, PORT
-from server.protocol import ProtocolError, Request, error_response, response
-from server.routes import ROUTES
-from server.transport import WebSocketTransport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-logger = logging.getLogger("server.app")
+logger = logging.getLogger("interfaces.ws.app")
 
 
 async def handle(connection) -> None:

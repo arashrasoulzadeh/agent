@@ -2,11 +2,11 @@
 
 `stages` is what makes the per-query pipeline composable and reorderable
 from configuration rather than hardcoded: it's an ordered list of names
-looked up in `pipeline.stages.STAGE_FACTORIES` (extendable via
+looked up in `domain.stages.STAGE_FACTORIES` (extendable via
 `register_stage()`), not a fixed sequence of method calls. Dropping
 `"synthesize"` from the list disables that step; adding a custom stage's
 registered name inserts it, in whatever position — nothing in
-`pipeline/__init__.py` needs to change either way.
+`domain/__init__.py` needs to change either way.
 
 `collect` stays a separate toggle rather than a `stages` entry: it's the
 one-time session bootstrap (ProjectPipeline.start()), not part of the
@@ -21,7 +21,7 @@ class PipelineConfig:
     collect: bool = True  # bootstrap step: gather the private project map
 
     # The per-query pipeline, in order. Looked up in
-    # pipeline.stages.STAGE_FACTORIES at ProjectPipeline construction time.
+    # domain.stages.STAGE_FACTORIES at ProjectPipeline construction time.
     stages: list[str] = field(default_factory=lambda: ["analyze", "synthesize"])
 
     # --- stage options ---

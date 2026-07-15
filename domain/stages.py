@@ -1,5 +1,5 @@
 """Concrete stages, and the registry that lets `PipelineConfig.stages`
-select and order them by name instead of `pipeline/__init__.py`
+select and order them by name instead of `domain/__init__.py`
 hardcoding a fixed sequence.
 
 `register_stage()` is the extension point: anyone can add a new stage
@@ -10,13 +10,13 @@ type (a redaction pass, a cache lookup, ...) and make it available to
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from pipeline.analyst import ProjectAnalyst
-from pipeline.context import ContextCollector
-from pipeline.stage import PipelineContext, Stage, Turn
-from pipeline.synthesizer import ContextSynthesizer
+from domain.analyst import ProjectAnalyst
+from domain.context import ContextCollector
+from domain.stage import PipelineContext, Stage, Turn
+from domain.synthesizer import ContextSynthesizer
 
 if TYPE_CHECKING:
-    from pipeline import ProjectPipeline
+    from domain import ProjectPipeline
 
 
 class CollectStage(Stage):

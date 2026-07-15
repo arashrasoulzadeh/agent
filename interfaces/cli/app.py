@@ -27,7 +27,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Input, RichLog, Static
 
-from ui import answer, error, style, trace
+from interfaces.cli import answer, error, style, trace
 
 EXIT_COMMANDS = {"exit", "quit", "q"}
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"

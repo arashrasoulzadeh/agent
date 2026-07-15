@@ -9,7 +9,7 @@ remembers prior turns (including tool calls) so follow-up questions can
 build on earlier answers without re-explaining the project.
 
 While the agent works, its tool calls and tool results are reported to a
-`Sink` (see pipeline/sink.py) so whatever is driving this analyst — a
+`Sink` (see domain/sink.py) so whatever is driving this analyst — a
 websocket server, a test, or nothing at all — can show them without this
 module needing to know how.
 
@@ -18,21 +18,22 @@ point, it uses the `ask` tool to put the question to the user and carries
 on from their answer rather than guessing.
 
 This module never imports `modules/` — the concrete list of tools the
-agent can call is handed in by whoever constructs it (server/rooms.py,
-in the real app), not hardcoded here. That keeps `pipeline/` reusable
-without the agent's specific toolset, and is what "core depends on
-nothing module-specific" means in practice: swap in a different tool
-list, or none at all, with no change to this file.
+agent can call is handed in by whoever constructs it (application/rooms.py,
+in the real app), not hardcoded here. Same reasoning for the LLM itself:
+this is `domain/`, so it takes `llm` as a plain constructor argument
+rather than importing `infrastructure/` to build one — a domain layer
+depending on infrastructure would have the dependency arrow backwards.
+`application/rooms.py` is what actually calls `infrastructure.llm.get_llm(...)`
+and hands the result in.
 """
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from helpers import get_llm
-from pipeline.context import ProjectContext
-from pipeline.prompts import SYSTEM_PROMPT, context_message
-from pipeline.sink import NullSink, Sink
+from domain.context import ProjectContext
+from domain.prompts import SYSTEM_PROMPT, context_message
+from domain.sink import NullSink, Sink
 
 
 class ProjectAnalyst:
@@ -40,12 +41,11 @@ class ProjectAnalyst:
 
     def __init__(
         self,
-        llm=None,
-        temperature: float = 0.0,
+        llm,
         sink: Sink | None = None,
         tools: list[BaseTool] | None = None,
     ):
-        self.llm = llm or get_llm(temperature)
+        self.llm = llm
         self.sink = sink or NullSink()
         self.tools = tools if tools is not None else []
         self._agent = None

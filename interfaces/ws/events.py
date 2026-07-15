@@ -6,16 +6,17 @@ subscribed to a room. See docs/PROTOCOL.md for the full catalog with
 example payloads.
 
 `broadcast()` delivers through the `Transport` interface
-(server/transport.py) only — it has no idea whether a given client is a
-websocket, a REST long-poll, or a gRPC stream, and it must never find out.
+(infrastructure/transport/base.py) only — it has no idea whether a given
+client is a websocket, a REST long-poll, or a gRPC stream, and it must
+never find out.
 """
 
 import logging
 
-from server import protocol
-from server.transport import Transport
+from infrastructure.transport.base import Transport
+from interfaces.ws import protocol
 
-logger = logging.getLogger("server.events")
+logger = logging.getLogger("interfaces.ws.events")
 
 # Sent right after create/resume, and again whenever any of its fields
 # change — the generic "something about this room's state changed" signal.

@@ -1,30 +1,31 @@
 """Client -> server requests: the route catalog.
 
 Kept separate from events.py on purpose (see that module's docstring).
-Every handler takes the `Transport` issuing the request (server/transport.py
-— never a raw websocket, HTTP request, or gRPC stream) and the request's
-`data`, and returns the dict that becomes the response's `data` — or
-raises `protocol.ProtocolError`, which server/app.py turns into an
-`{"ok": false, "error": ...}` response without ever crashing the
-connection. Nothing in this file is WebSocket-specific.
+Every handler takes the `Transport` issuing the request
+(infrastructure/transport/base.py — never a raw websocket, HTTP request,
+or gRPC stream) and the request's `data`, and returns the dict that
+becomes the response's `data` — or raises `protocol.ProtocolError`, which
+server/app.py turns into an `{"ok": false, "error": ...}` response
+without ever crashing the connection. Nothing in this file is
+WebSocket-specific.
 """
 
 import asyncio
 import logging
 from typing import Any
 
-from server import rooms
-from server.protocol import ProtocolError
-from server.transport import Transport
+from application import rooms
+from infrastructure.transport.base import Transport
+from interfaces.ws.protocol import ProtocolError
 
-logger = logging.getLogger("server.routes")
+logger = logging.getLogger("interfaces.ws.routes")
 
 
 def _fire(coro) -> None:
     """Run `coro` in the background; log if it ever raises.
 
     Used for anything a route must not block on — see the note on
-    Room's turn methods in server/rooms.py for why /prompt can't just
+    Room's turn methods in application/rooms.py for why /prompt can't just
     `await` the whole turn.
     """
     task = asyncio.create_task(coro)
@@ -66,7 +67,7 @@ async def prompt(transport: Transport, data: dict) -> dict:
         raise ProtocolError("/prompt needs 'text'")
     if not room.try_start_turn():
         raise ProtocolError("a turn is already running in this room")
-    # Must not await the turn itself — see the note in server/rooms.py.
+    # Must not await the turn itself — see the note in application/rooms.py.
     _fire(room.run_prompt(text))
     return {"accepted": True}
 

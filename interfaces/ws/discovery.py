@@ -1,12 +1,13 @@
 """Is a server already listening? The server is a separate process, run
-on its own (`python -m server`); a client just needs the same host:port
-to attach to the exact same rooms. Clients only check — they never start
-it, so the server's lifecycle is never tied to any one client.
+on its own (`agent-server`, or `python -m interfaces.ws`); a client just
+needs the same host:port to attach to the exact same rooms. Clients only
+check — they never start it, so the server's lifecycle is never tied to
+any one client.
 """
 
 import websockets
 
-from server.config import HOST, PORT
+from interfaces.ws.config import HOST, PORT
 
 
 class ServerNotRunning(RuntimeError):
@@ -18,7 +19,7 @@ class ServerNotRunning(RuntimeError):
         super().__init__(
             f"No agent server is listening on ws://{host}:{port}.\n"
             f"Start one in another terminal first:\n\n"
-            f"    python -m server\n"
+            f"    agent-server\n"
         )
 
 

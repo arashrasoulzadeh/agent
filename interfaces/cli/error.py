@@ -7,7 +7,7 @@ English server-side (see server/errors.py) — the client just displays it.
 from rich.panel import Panel
 from rich.text import Text
 
-from ui import style
+from interfaces.cli import style
 
 
 def show(app, message: str) -> None:

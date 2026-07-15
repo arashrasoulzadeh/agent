@@ -1,6 +1,6 @@
 """Project-analysis pipeline.
 
-Orchestrates three stages (pipeline/stage.py, pipeline/stages.py):
+Orchestrates three stages (domain/stage.py, domain/stages.py):
     1. collect    — gather a private project map. No LLM.
     2. analyze    — reason over that map and answer questions.
     3. synthesize — convert an answer into AI-ready context.
@@ -15,23 +15,20 @@ Two ways to drive it:
       config — nothing here hardcodes the sequence.
 
 Every stage can also be swapped for a custom implementation via the
-constructor, and an optional `events` bus (pipeline/events.py) reports
+constructor, and an optional `events` bus (domain/events.py) reports
 stage lifecycle to anyone listening, so the pipeline can be reshaped or
 observed without editing its wiring.
 """
 
 import asyncio
 
-from langchain_core.tools import BaseTool
-
-from pipeline.analyst import ProjectAnalyst
-from pipeline.config import PipelineConfig
-from pipeline.context import ContextCollector, ProjectContext
-from pipeline.events import StageEventBus
-from pipeline.sink import Sink
-from pipeline.stage import Pipeline, PipelineContext, Turn
-from pipeline.stages import STAGE_FACTORIES
-from pipeline.synthesizer import ContextSynthesizer
+from domain.analyst import ProjectAnalyst
+from domain.config import PipelineConfig
+from domain.context import ContextCollector, ProjectContext
+from domain.events import StageEventBus
+from domain.stage import Pipeline, PipelineContext, Turn
+from domain.stages import STAGE_FACTORIES
+from domain.synthesizer import ContextSynthesizer
 
 
 class ProjectPipeline:
@@ -41,22 +38,22 @@ class ProjectPipeline:
         collector: ContextCollector | None = None,
         analyst: ProjectAnalyst | None = None,
         synthesizer: ContextSynthesizer | None = None,
-        sink: Sink | None = None,
         events: StageEventBus | None = None,
-        tools: list[BaseTool] | None = None,
     ):
         self.config = config or PipelineConfig()
-        # No library-level default: unlike an analyst with no tools (still
-        # functional, just limited), a collector with no metadata source
-        # can't do anything — see collect_context()'s check below.
+        # None of these have a library-level default: a collector needs a
+        # real metadata source, an analyst/synthesizer need a real LLM —
+        # domain/ doesn't import infrastructure/ or modules/ to build any
+        # of that itself (that would point the dependency arrow the wrong
+        # way). The caller (application/rooms.py, in the real app) builds
+        # the concrete objects — including calling
+        # infrastructure.llm.get_llm(...) — and passes them in. Missing
+        # ones surface as a clear error the first time they're needed
+        # (collect_context()/start()/ask()/run()), not a confusing
+        # AttributeError on None.
         self.collector = collector
-        self.analyst = analyst or ProjectAnalyst(
-            temperature=self.config.analysis_temperature, sink=sink, tools=tools
-        )
-        self.synthesizer = synthesizer or ContextSynthesizer(
-            temperature=self.config.synthesis_temperature,
-            fmt=self.config.synthesis_format,
-        )
+        self.analyst = analyst
+        self.synthesizer = synthesizer
         self.events = events
         self.context: ProjectContext | None = None
 
@@ -71,7 +68,7 @@ class ProjectPipeline:
             if factory is None:
                 raise ValueError(
                     f"unknown pipeline stage {name!r}; register it first "
-                    "with pipeline.stages.register_stage()"
+                    "with domain.stages.register_stage()"
                 )
             stages.append(factory(self))
         return Pipeline(stages)
@@ -79,10 +76,10 @@ class ProjectPipeline:
     def _run_sync(self, pipeline: Pipeline, turn: Turn) -> Turn:
         """Drive an async Pipeline from this (synchronous) call site.
 
-        Meant to be called from the one worker thread server/rooms.py
+        Meant to be called from the one worker thread application/rooms.py
         already dedicates to a turn (via `asyncio.to_thread`), so a fresh
         event loop here is exactly the standard, safe way to run async
-        code with no loop of its own — see pipeline/stage.py's module
+        code with no loop of its own — see domain/stage.py's module
         docstring for why stages are async at all despite today's
         concrete stages doing blocking work.
 
@@ -103,21 +100,28 @@ class ProjectPipeline:
             )
         return asyncio.run(pipeline.run(turn, PipelineContext(events=self.events)))
 
+    def _require(self, obj, name: str, example: str) -> None:
+        if obj is None:
+            raise RuntimeError(
+                f"No {name} configured — pass {example} to ProjectPipeline()."
+            )
+
     def collect_context(self, path: str = ".") -> ProjectContext:
         """Stage 1 — collect and cache the private project map."""
         if not self.config.collect:
             raise RuntimeError("collect step is disabled in config.")
-        if self.collector is None:
-            raise RuntimeError(
-                "No ContextCollector configured — pass "
-                "collector=ContextCollector(metadata_fn=...) to ProjectPipeline()."
-            )
+        self._require(
+            self.collector,
+            "ContextCollector",
+            "collector=ContextCollector(metadata_fn=...)",
+        )
         turn = self._run_sync(self._collect_pipeline, Turn(path=path, query=""))
         self.context = turn.context
         return self.context
 
     def start(self, path: str = ".") -> ProjectContext:
         """Collect context and open an interactive analysis session."""
+        self._require(self.analyst, "ProjectAnalyst", "analyst=ProjectAnalyst(llm=...)")
         context = self.collect_context(path)
         self.analyst.start_session(context)
         return context
@@ -128,6 +132,7 @@ class ProjectPipeline:
         Remembers prior turns, so follow-up questions can build on
         earlier answers. Call start() first.
         """
+        self._require(self.analyst, "ProjectAnalyst", "analyst=ProjectAnalyst(llm=...)")
         if self.context is None:
             raise RuntimeError("Call start() before ask().")
         turn = Turn(path=self.context.path, query=query, context=self.context)
@@ -142,10 +147,17 @@ class ProjectPipeline:
         Returns the synthesized context when the synthesize stage ran,
         otherwise the analyst's raw answer.
         """
+        self._require(self.analyst, "ProjectAnalyst", "analyst=ProjectAnalyst(llm=...)")
         if self.context is None:
             raise RuntimeError("Call collect_context() before run().")
         if "analyze" not in self.config.stages:
             raise RuntimeError("analyze step is disabled in config.")
+        if "synthesize" in self.config.stages:
+            self._require(
+                self.synthesizer,
+                "ContextSynthesizer",
+                "synthesizer=ContextSynthesizer(llm=...)",
+            )
 
         self.analyst.start_session(self.context)  # a fresh, one-shot session
         turn = Turn(path=self.context.path, query=query, context=self.context)

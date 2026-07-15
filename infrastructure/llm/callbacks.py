@@ -4,7 +4,7 @@ This runs wherever the LLM does — the server process — so it logs
 through the standard `logging` module rather than a UI: there's no
 `ui` to report through anymore now that the client is a separate process
 talking over a socket. Set AGENT_VERBOSE=1 to also print these lines
-(server/app.py configures logging for the whole process).
+(interfaces/ws/app.py configures logging for the whole process).
 """
 
 import logging

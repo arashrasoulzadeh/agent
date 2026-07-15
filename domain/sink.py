@@ -1,10 +1,10 @@
 """Where `ProjectAnalyst` reports tool calls, results, and token usage.
 
-`pipeline/` has no business knowing whether it's driven by a websocket
+`domain/` has no business knowing whether it's driven by a websocket
 server, a test, or nothing at all — so it reports through this narrow
-interface instead of importing a renderer directly. `server/rooms.py`
+interface instead of importing a renderer directly. `application/rooms.py`
 implements one that broadcasts protocol events; `NullSink` is the default,
-so `pipeline/` stays fully usable standalone (e.g. in tests) with no
+so `domain/` stays fully usable standalone (e.g. in tests) with no
 sink at all.
 """
 

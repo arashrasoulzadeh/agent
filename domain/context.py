@@ -6,9 +6,9 @@ no reasoning and talks to no LLM.
 
 This module never imports `modules/` — the function that actually
 produces the metadata blob (in the real app, `modules.metadata.invoke`)
-is handed in by whoever constructs a ContextCollector (server/rooms.py),
-not hardcoded here. Same reasoning as pipeline/analyst.py's `tools`
-parameter: `pipeline/` stays reusable without any specific concrete tool.
+is handed in by whoever constructs a ContextCollector (application/rooms.py),
+not hardcoded here. Same reasoning as domain/analyst.py's `tools`
+parameter: `domain/` stays reusable without any specific concrete tool.
 """
 
 from collections.abc import Callable
