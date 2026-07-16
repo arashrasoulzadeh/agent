@@ -115,6 +115,39 @@ def outer():
     def test_empty_source_returns_none(self):
         self.assertIsNone(extract_python(""))
 
+    def test_module_docstring_captured_as_module_summary(self):
+        source = '''"""Rooms: one per project session.
+
+More detail on a second line, not captured.
+"""
+
+def f():
+    pass
+'''
+        result = extract_python(source)
+        self.assertEqual(result["module_summary"], "Rooms: one per project session.")
+
+    def test_module_docstring_only_no_declarations_not_none(self):
+        source = '"""Just explains what this module is for."""\n'
+        result = extract_python(source)
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result["module_summary"], "Just explains what this module is for."
+        )
+        self.assertEqual(result["functions"], [])
+        self.assertEqual(result["classes"], [])
+        self.assertEqual(result["variables"], [])
+
+    def test_no_module_docstring_and_no_declarations_still_none(self):
+        source = "print('just a statement, no defs')\n"
+        result = extract_python(source)
+        self.assertIsNone(result)
+
+    def test_no_module_docstring_present_when_absent(self):
+        source = "def f():\n    pass\n"
+        result = extract_python(source)
+        self.assertIsNone(result["module_summary"])
+
     def test_syntax_error_returns_none_not_raises(self):
         result = extract_python("def broken(:\n    pass")
         self.assertIsNone(result)

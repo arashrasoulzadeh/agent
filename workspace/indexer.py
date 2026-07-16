@@ -101,10 +101,38 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _synthesize_summary(signatures: dict) -> str | None:
+    """A free, deterministic fallback description for a file with no
+    module docstring — e.g. "2 functions, 1 class" — from declaration
+    counts alone, empty categories omitted. None if there's nothing to
+    describe (only called when there's no module docstring either, so a
+    None here means the file gets no description at all).
+    """
+    counts = [
+        (len(signatures.get("functions", [])), "function", "functions"),
+        (len(signatures.get("classes", [])), "class", "classes"),
+        (len(signatures.get("variables", [])), "variable", "variables"),
+    ]
+    parts = [
+        f"{n} {singular if n == 1 else plural}" for n, singular, plural in counts if n
+    ]
+    return ", ".join(parts) if parts else None
+
+
 def _extract_derived(full: Path, language: str | None) -> dict | None:
     """Structural signatures (function/class/variable declarations, a
     one-line docstring summary) for a file whose language has a
     registered extractor (workspace/signatures.py) — never full source.
+
+    `derived["summary"]` is populated automatically here — preferring
+    the file's own module docstring (workspace/signatures.py's
+    `module_summary`), falling back to `_synthesize_summary()` when
+    there's no docstring but there are declarations. This is the same
+    slot workspace/serialize.py already reads and the same slot
+    SessionManager.set_derived() can still overwrite manually (e.g. an
+    LLM-generated summary) — that write path is unaffected, since a
+    real content change re-runs this function and recomputes fresh,
+    same as it always has for `signatures` itself.
 
     Skips the read entirely for a language with no extractor, so this
     costs nothing for the large majority of a typical project's files.
@@ -118,7 +146,14 @@ def _extract_derived(full: Path, language: str | None) -> dict | None:
     except OSError:
         return None
     signatures = extract_signatures(language, text)
-    return {"signatures": signatures} if signatures else None
+    if not signatures:
+        return None
+    module_summary = signatures.pop("module_summary", None)
+    summary = module_summary or _synthesize_summary(signatures)
+    derived: dict = {"signatures": signatures}
+    if summary:
+        derived["summary"] = summary
+    return derived
 
 
 class ProjectIndexer:

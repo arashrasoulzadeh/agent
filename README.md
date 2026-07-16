@@ -376,9 +376,14 @@ checks for a cached prior analysis before ever calling the LLM — a
 repeat run of an unchanged project answers instantly from cache, and a
 project that's drifted too much since that cache was made prompts the
 client for a `/resync` instead of silently trusting or discarding it.
-See [`docs/SESSIONS.md`](docs/SESSIONS.md) for the on-disk layout, the
-metadata schema, the room-bootstrap integration, and the invariants that
-keep it crash-safe and race-free.
+Every bootstrap — first-ever, cached, or a confirmed resync — seeds the
+agent with only a lightweight, one-line-per-file map, never every file's
+full signatures up front; the agent escalates to a `describe(path)` tool
+for one file's actual structure, and to `cat` for real source, only when
+the question actually needs it. See [`docs/SESSIONS.md`](docs/SESSIONS.md)
+for the on-disk layout, the metadata schema, the room-bootstrap
+integration, the two-tier metadata design, and the invariants that keep
+it crash-safe and race-free.
 
 ### Safety
 

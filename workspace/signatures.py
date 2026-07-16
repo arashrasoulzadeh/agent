@@ -1,7 +1,11 @@
 """Extracts lightweight structural signatures from source files —
 function/class/variable declarations and a one-line summary (their
 docstring's first line, when present) — never full function/method
-bodies or module-level statement bodies.
+bodies or module-level statement bodies. Also extracts the file's own
+module-level docstring (first line, under the `module_summary` key) —
+the free, deterministic source for workspace/indexer.py's per-file
+`derived["summary"]`, distinct from the per-function/per-class `summary`
+key nested inside `signatures`.
 
 Python only for now, via the stdlib `ast` module (parses, never
 executes, so this is safe to run against untrusted source and needs no
@@ -117,13 +121,16 @@ def _variable_signature(
 def extract_python(source: str) -> dict[str, Any] | None:
     """Parse Python source and return its top-level structural
     signatures (functions, classes with their methods, module-level
-    variables), or None if it doesn't parse or has nothing to report.
-    Never raises - a syntax error (or a non-Python file misdetected as
-    Python) is just "no signatures," not a failure."""
+    variables, and the module's own docstring first line as
+    `module_summary`), or None if it doesn't parse or has nothing to
+    report at all. Never raises - a syntax error (or a non-Python file
+    misdetected as Python) is just "no signatures," not a failure."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError):
         return None
+
+    module_summary = _first_line(ast.get_docstring(tree))
 
     functions = []
     classes = []
@@ -143,9 +150,14 @@ def extract_python(source: str) -> dict[str, Any] | None:
                 if isinstance(target, ast.Name):
                     variables.append(_variable_signature(target.id, None, node.value))
 
-    if not functions and not classes and not variables:
+    if not functions and not classes and not variables and not module_summary:
         return None
-    return {"functions": functions, "classes": classes, "variables": variables}
+    return {
+        "functions": functions,
+        "classes": classes,
+        "variables": variables,
+        "module_summary": module_summary,
+    }
 
 
 EXTRACTORS = {

@@ -224,6 +224,39 @@ class TestPersistenceAndResume(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(resumed["id"], room_id)
 
+    async def test_prompt_succeeds_after_resuming_a_room_from_disk(self):
+        """Regression test: Room.get_or_load() restores the analyst's
+        conversation via resume(), but a follow-up /prompt goes through
+        ProjectPipeline.ask(), which has its own separate precondition —
+        self.context must be set, or it raises "Call start() before
+        ask()." get_or_load() used to never set it (nothing does, on a
+        resume, unless something explicitly fixes this), so the very
+        first /prompt after a resume would fail on the real pipeline.
+        StubPipeline.ask() now enforces the same precondition (see
+        tests/stubs.py), so this test fails loudly without the fix in
+        Room.get_or_load()."""
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            data = await send_request(ws, "/session/create", {"path": "."})
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            saved_json = (rooms.ROOMS_DIR / f"{room_id}.json").read_text()
+
+        async with running_server(StubPipeline) as uri:
+            rooms.ROOMS_DIR.mkdir(parents=True, exist_ok=True)
+            (rooms.ROOMS_DIR / f"{room_id}.json").write_text(saved_json)
+            async with websockets.connect(uri) as ws2:
+                await send_request(ws2, "/session/resume", {"room": room_id})
+
+                await send_request(
+                    ws2, "/prompt", {"text": "a follow-up"}, room=room_id
+                )
+                answer = await recv_until(
+                    ws2, lambda m: m.get("event") == "answer"
+                )
+                self.assertEqual(
+                    answer["data"]["text"], "stub answer to: a follow-up"
+                )
+
     async def test_rooms_list_includes_saved_rooms(self):
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
             data = await send_request(ws, "/session/create", {"path": "."})
@@ -312,6 +345,33 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(synthesis.answer, answer["data"]["text"])
             self.assertEqual(synthesis.file_count, 5)
 
+    async def test_first_bootstrap_seeds_from_lightweight_index_not_full_signatures(
+        self,
+    ):
+        """Proves the very first-ever analysis of a project (no cached
+        synthesis yet) is seeded from workspace/'s tier-1 lightweight
+        index (service/rooms.py's _workspace_context(), built on
+        to_lightweight_context()) and not the old shallow tool.metadata
+        listing or the full-signature to_prompt_context() — neither of
+        which distinguishes itself from the other in any assertion above.
+        A rendered function signature line for one of the fixture files
+        would only appear if the full-signature tier had leaked in.
+        """
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            live_room = rooms.ROOMS[room_id]
+            raw = live_room.pipeline.context.raw
+            self.assertIn("mod0.py", raw)
+            self.assertIn("1 function", raw)
+            self.assertNotIn("def f0()", raw)
+
     async def test_second_bootstrap_after_reset_uses_cache_without_llm(self):
         async with running_server(
             StubPipeline, base_dir=self.base_dir
@@ -344,7 +404,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(state["data"]["resync_suggested"])
 
             live_room = rooms.ROOMS[room_id]
-            self.assertIsNone(live_room.pipeline.started_with)
+            # No real analysis ran at all — proof the cache hit skipped
+            # the LLM entirely (Room._collect_and_start() no longer
+            # calls pipeline.start() for any bootstrap, cached or not,
+            # so .questions is the one signal left that .ask() ran).
             self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_suggested_when_project_has_drifted_past_threshold(self):
@@ -386,7 +449,7 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(live_room.resync_suggested)
             # Still cache-only: the drift is flagged, but the LLM hasn't
             # been called yet — that's what a confirmed /resync is for.
-            self.assertIsNone(live_room.pipeline.started_with)
+            self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_confirm_reruns_analysis_and_updates_cache(self):
         async with running_server(
@@ -420,7 +483,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             await recv_until(ws, lambda m: m.get("event") == "answer")
 
             live_room = rooms.ROOMS[room_id]
-            self.assertEqual(live_room.pipeline.started_with, str(self.project_dir))
+            # A confirmed resync runs a real ask() — Room._collect_and_
+            # start_for_resync() seeds context itself (no more
+            # pipeline.start() to observe), so .questions is the proof
+            # a fresh analysis actually happened this time.
             self.assertEqual(live_room.pipeline.questions, [rooms.BOOTSTRAP_QUERY])
             self.assertFalse(live_room.resync_suggested)
 
@@ -459,7 +525,7 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
 
             live_room = rooms.ROOMS[room_id]
             self.assertFalse(live_room.resync_suggested)
-            self.assertIsNone(live_room.pipeline.started_with)
+            self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_rejected_when_none_is_pending(self):
         async with running_server(

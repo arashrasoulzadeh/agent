@@ -53,6 +53,47 @@ class TestProjectIndexer(unittest.TestCase):
         index = self.indexer.build()
         self.assertIsNone(index.files["a.go"].derived)
 
+    def test_build_uses_module_docstring_as_summary(self):
+        self._write("a.py", '"""Does one specific thing."""\n\ndef f():\n    pass\n')
+        index = self.indexer.build()
+        derived = index.files["a.py"].derived
+        self.assertEqual(derived["summary"], "Does one specific thing.")
+        # The module docstring never leaks into signatures itself.
+        self.assertNotIn("module_summary", derived["signatures"])
+
+    def test_build_synthesizes_summary_when_no_docstring(self):
+        self._write(
+            "a.py",
+            "def f():\n    pass\n\ndef g():\n    pass\n\nclass C:\n    pass\n",
+        )
+        index = self.indexer.build()
+        derived = index.files["a.py"].derived
+        self.assertEqual(derived["summary"], "2 functions, 1 class")
+
+    def test_build_synthesized_summary_uses_singular_for_count_of_one(self):
+        self._write("a.py", "def f():\n    pass\n")
+        index = self.indexer.build()
+        self.assertEqual(index.files["a.py"].derived["summary"], "1 function")
+
+    def test_build_synthesized_summary_includes_variables(self):
+        self._write("a.py", "TIMEOUT = 30\nRETRIES = 3\n")
+        index = self.indexer.build()
+        self.assertEqual(index.files["a.py"].derived["summary"], "2 variables")
+
+    def test_build_no_summary_when_neither_docstring_nor_declarations(self):
+        self._write("a.py", "hello")
+        index = self.indexer.build()
+        self.assertIsNone(index.files["a.py"].derived)
+
+    def test_reconcile_recomputes_summary_when_docstring_changes(self):
+        self._write("a.py", '"""Old summary."""\n\ndef f():\n    pass\n')
+        index = self.indexer.build()
+        self.assertEqual(index.files["a.py"].derived["summary"], "Old summary.")
+
+        self._write("a.py", '"""New summary."""\n\ndef f():\n    pass\n')
+        index = self.indexer.reconcile(index)
+        self.assertEqual(index.files["a.py"].derived["summary"], "New summary.")
+
     def test_reconcile_recomputes_signatures_on_content_change(self):
         self._write("a.py", "def old_name():\n    pass\n")
         index = self.indexer.build()

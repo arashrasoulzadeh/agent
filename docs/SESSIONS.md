@@ -16,8 +16,10 @@ project's files from scratch every time.
 
 `service/rooms.py` wires this into the agent's own conversation flow at
 bootstrap time — see "Room bootstrap integration" below for how a room's
-project maps onto a session, and how a cached prior analysis lets a
-room skip the LLM entirely.
+project maps onto a session, how a cached prior analysis lets a room skip
+the LLM entirely, and how every bootstrap seeds the agent from a
+lightweight, two-tier view of this metadata rather than dumping every
+file's full signatures into one prompt.
 
 ## Quickstart
 
@@ -42,13 +44,13 @@ agent-session serialize test_session --project p1 --glob "*.py"
 | `config.py` | `SESSION_ROOT` — `AGENT_SESSION_ROOT` env var, default `~/.agent-session-root/`. |
 | `ignore.py` | `IgnoreRules`: `.gitignore` (via `pathspec`) + a configurable extra pattern list + binary-extension/oversized-file/symlink exclusion, plus a hardcoded, non-overridable `.env`/`.env.*` exclusion (`core.guard.is_secret()`). |
 | `indexer.py` | `ProjectIndexer`: `build()` (full walk), `reconcile(existing)` (full walk, cheap mtime+size pre-check before ever rehashing), `update_paths()`/`resync_subtree()`/`rename_subtree()` (incremental, watcher-driven). Calls into `signatures.py` for any new/changed file whose language has a registered extractor. |
-| `signatures.py` | `extract_signatures(language, source)`: parses source (Python via `ast`, never executes it) into top-level function/class/variable signatures + a one-line docstring summary each — never bodies. Returns `None` for an unregistered language, a syntax error, or a file with nothing to report; never raises. |
+| `signatures.py` | `extract_signatures(language, source)`: parses source (Python via `ast`, never executes it) into top-level function/class/variable signatures, each with a one-line docstring summary, plus the file's own module-level docstring first line (`module_summary`) — never bodies. Returns `None` for an unregistered language, a syntax error, or a file with nothing at all to report; never raises. |
 | `index_repository.py` | `IndexRepository`: atomic `index.json` read/write, one file per attached project. |
 | `manifest_repository.py` | `ManifestRepository`: atomic `manifest.json` read/write, one file per session. |
 | `synthesis_repository.py` | `SynthesisRepository`: atomic `synthesis.json` read/write, one file per attached project — the cached bootstrap answer `service/rooms.py` checks before spending an LLM call. |
 | `watcher.py` | `ProjectWatcher`: wraps a `watchdog` `Observer`, debounces bursts of events, flushes to disk. |
 | `manager.py` | `SessionManager`: `create`/`load`/`attach`/`detach`/`list_sessions`/`list_projects`/`status`/`set_derived`. |
-| `serialize.py` | `to_prompt_context()`: compact, token-efficient metadata serialization for an LLM prompt. |
+| `serialize.py` | Two-tier metadata serialization for an LLM prompt: `to_lightweight_context()` (path + one-line description per file, no signatures — tier 1, what every bootstrap seeds from) and `to_prompt_context()` (the above plus every file's full signatures — tier 2, used by the `agent-session serialize` CLI and by `render_file_signatures()` for one file at a time). |
 | `cli.py` | The `agent-session` console script. |
 
 Pure data shapes (`FileMetadata`, `ProjectIndex`, `ProjectAttachment`,
@@ -87,6 +89,7 @@ relative, forward-slash-normalized path:
       "language": "python",
       "binary": false,
       "derived": {
+        "summary": "Small arithmetic helpers.",
         "signatures": {
           "functions": [
             {
@@ -110,10 +113,16 @@ relative, forward-slash-normalized path:
 }
 ```
 
-`derived` also carries a `"summary"` key when one's been set via
-`SessionManager.set_derived()` (e.g. an LLM-generated one-line
-description) — both keys coexist; `to_prompt_context()` renders whichever
-are present.
+`derived["summary"]` is populated automatically (`workspace/indexer.py`'s
+`_extract_derived()`), free and deterministic, no LLM call: a file's own
+module docstring first line when it has one, else a synthesized blurb
+from declaration counts (`"2 functions, 1 class"`), else nothing.
+`SessionManager.set_derived()` can still overwrite this manually (e.g. an
+LLM-generated summary) — that write path is untouched; a real content
+change always recomputes fresh, same as `signatures` itself.
+`to_lightweight_context()` renders only this `summary` per file; the
+full `signatures` block is tier 2, rendered by `to_prompt_context()`
+(every file) or `render_file_signatures()` (one file, on demand).
 
 A single `index.json` per project, not one file per mirrored source
 file: cheap prompt serialization (one read, already-parsed) and cheap
@@ -180,29 +189,75 @@ freshly created, resumed, or re-bootstrapped — and starts a background
 keeps per-file signatures fresh regardless of what the bootstrap
 decision below does.
 
-**Bootstrap decision** (`Room._collect_and_start()`): after that
-reconcile, look up a cached `ProjectSynthesis` (`synthesis.json`):
+**Every bootstrap seeds from the lightweight (tier-1) index first**
+(`Room._collect_and_start()`, via `_workspace_context()` /
+`to_lightweight_context()`) — regardless of whether a cached answer
+exists, since the reconcile above already guarantees the index is built
+by this point. `agent/`'s own `ContextCollector`/`tool.metadata` path
+(a shallow, non-recursive single-directory listing) is no longer used by
+Room at all; the compact, per-file-description map is what every
+analysis — first-ever, cached, or a confirmed resync — starts from. Full
+per-file structural detail (functions/classes/variables) is never sent
+up front; the agent fetches it on demand, one file at a time, via the
+`describe` tool (`tool/describe.py`) before falling back to `cat` for
+real source — see "Two-tier metadata" below.
 
-- **No cache** — run the pipeline's normal collect+analyze, exactly as
-  before this integration existed.
+After that seeding, look up a cached `ProjectSynthesis` (`synthesis.json`)
+to decide whether an LLM call is needed at all:
+
+- **No cache** — the session is seeded, but there's no cached answer to
+  reuse; the caller still runs a real `ask()`.
 - **Cache hit, drift below `RESYNC_CHANGE_THRESHOLD`** (20% of tracked
-  files added/removed/content-changed since the cache was made) — seed
-  the analyst's session from this store's compact, signature-based
-  context (`to_prompt_context()`) instead of a raw metadata dump, and
+  files added/removed/content-changed since the cache was made) —
   answer with the cached text directly. No LLM call happens at all —
-  this is the actual token-saving payoff, and also what lets the *next*
-  room for the same path skip the LLM even if that room's own
-  `rooms/{id}.json` was reset (there's no resumable conversation, but
-  the workspace-level cache survives independently).
-- **Cache hit, drift at/above the threshold** — same compact
-  context-seeding, but the cached answer is flagged instead of trusted
-  silently: the room sets `resync_suggested = True` and emits a
-  `resync.suggested` event (`wire/events.py`) with the change counts,
-  deferring to the user via `/resync` (`wire/routes.py`) rather than
-  silently serving stale data or silently re-spending tokens.
-  `confirm: true` re-runs a real analysis and refreshes `synthesis.json`
-  (`Room.run_resync()`); `confirm: false` just clears the flag. See
-  `docs/PROTOCOL.md` for the wire-level shape of both.
+  the actual token-saving payoff, and also what lets the *next* room for
+  the same path skip the LLM even if that room's own `rooms/{id}.json`
+  was reset (there's no resumable conversation, but the workspace-level
+  cache survives independently).
+- **Cache hit, drift at/above the threshold** — the cached answer is
+  flagged instead of trusted silently: the room sets
+  `resync_suggested = True` and emits a `resync.suggested` event
+  (`wire/events.py`) with the change counts, deferring to the user via
+  `/resync` (`wire/routes.py`) rather than silently serving stale data
+  or silently re-spending tokens. `confirm: true` re-runs a real
+  analysis (seeded the same way, via `_collect_and_start_for_resync()`)
+  and refreshes `synthesis.json` (`Room.run_resync()`); `confirm: false`
+  just clears the flag. See `docs/PROTOCOL.md` for the wire-level shape
+  of both.
+
+## Two-tier metadata: lightweight map + on-demand signatures
+
+`to_prompt_context()`'s full-signature dump (every file's functions/
+classes/variables, inline, every turn) doesn't scale — for anything but
+a small project it's simply too much of the token budget spent on files
+the agent never ends up needing. Two tiers instead, matching how the
+agent already treats real file content (map first, read on demand):
+
+1. **Always-on, cheap** — `to_lightweight_context()`: path + one-line
+   `derived["summary"]` per file, nothing else. This is what every
+   bootstrap seeds the analyst's session with.
+2. **On-demand, one file at a time** — the `describe` tool
+   (`tool/describe.py`), an agent-visible LangChain tool (auto-
+   discovered by `tool/registry.py`, no registration step) that returns
+   one file's full `render_file_signatures()` output — cheaper than
+   reading the real file, richer than the map's one-line description.
+   It needs to know which room's workspace project to look up without
+   `service/rooms.py` injecting anything (tools are bare
+   `@tool`-decorated functions, nothing to inject into) — `core/
+   room_context.py` is a contextvar for exactly that, set at the same
+   worker-thread call sites `core/guard.py`'s project root already is
+   (`Room._ask_blocking()`, `_collect_and_start()`,
+   `_collect_and_start_for_resync()`), for the same isolation reason:
+   `asyncio.to_thread` copies the calling context into the new thread,
+   so a room id set inside one room's worker thread stays invisible to
+   every other concurrently running room's thread.
+3. **On-demand, real source** (unchanged) — `cat`, for when structure
+   alone isn't enough.
+
+`agent/prompts.py`'s `SYSTEM_PROMPT` spells out the escalation order:
+the map's description first, `describe` for shape, `cat` for real
+content — never skip straight to `cat` when `describe` would answer the
+question.
 
 A fresh analysis (whether the first ever, or a confirmed resync) caches
 its result afterward as a deliberately fire-and-forget tail step
@@ -219,9 +274,11 @@ next `/prompt` waiting on a disk write.
   extractor yet (`workspace/signatures.py`'s `EXTRACTORS` registry is
   built to add more without a redesign, but nothing else is registered
   today) — their files' `derived` stays `None` unless something calls
-  `set_derived()` for them. There's also no summarization or import-graph
-  extraction — signatures (what a function/class/variable *declares*,
-  not what it does at runtime) are all that's automatic.
+  `set_derived()` for them. There's also no import-graph extraction —
+  signatures (what a function/class/variable *declares*, not what it
+  does at runtime) plus a module's own docstring are all that's
+  automatic; an LLM-generated one-line summary is still only possible
+  manually, via `set_derived()`.
 - **A running `load` doesn't hot-reload manifest changes.** `attach`/
   `detach` from a separate invocation won't affect an already-running
   foreground `load`'s watcher set; restart it to pick up changes.
@@ -233,10 +290,12 @@ next `/prompt` waiting on a disk write.
 `watchdog` `Observer` against a temp directory), `test_workspace_manager.py`,
 `test_workspace_serialize.py`, and `test_workspace_synthesis_repository.py`
 cover ignore rules, reconciliation/invalidation logic, signature
-extraction, the watcher's debounce/flush/graceful-stop behavior,
-session/project lifecycle, prompt serialization, and the synthesis
-cache's atomic save/load, respectively — none of them touch a real LLM
-or spend an API token.
+extraction (including module-docstring capture and the synthesized-blurb
+fallback), the watcher's debounce/flush/graceful-stop behavior,
+session/project lifecycle, prompt serialization (both tiers —
+`to_prompt_context()` and `to_lightweight_context()` — plus
+`render_file_signatures()`), and the synthesis cache's atomic save/load,
+respectively — none of them touch a real LLM or spend an API token.
 
 The room-bootstrap integration itself is covered from the `service/`
 side: `tests/test_rooms_cache.py` unit-tests the change-fraction/
@@ -244,8 +303,15 @@ resync-threshold boundary logic in isolation, and
 `tests/test_server.py`'s `TestWorkspaceCacheIntegration` exercises the
 full flow end to end over a real (test) WebSocket connection — a
 bootstrap populating the cache, a later room for the same path skipping
-the stub pipeline's `.start()`/`.ask()` entirely on a cache hit, a
-drifted project getting `resync.suggested` instead of a silent stale
-answer, and a confirmed `/resync` re-running the (stub) analysis and
-refreshing the cache — all through `tests/stubs.py`'s `StubPipeline`,
-never a real LLM call.
+the stub pipeline's `.ask()` entirely on a cache hit, a drifted project
+getting `resync.suggested` instead of a silent stale answer, a confirmed
+`/resync` re-running the (stub) analysis and refreshing the cache, and a
+first-ever bootstrap proven to seed from the lightweight tier (no
+rendered function signature in the seeded context) rather than the old
+shallow listing or the full-signature tier — all through
+`tests/stubs.py`'s `StubPipeline`, never a real LLM call. `tests/
+test_core_room_context.py` and `tests/test_tool_describe.py` cover the
+new per-room contextvar (including thread isolation via
+`asyncio.to_thread`, mirroring `core/guard.py`'s own) and the `describe`
+tool (full detail, the no-signatures fallback, path confinement, and
+graceful errors for an untracked path or no active room) respectively.

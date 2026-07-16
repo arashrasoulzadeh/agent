@@ -56,7 +56,7 @@ from agent.collector import ContextCollector
 from agent.config import PipelineConfig
 from agent.events import LoggingStageObserver, StageEventBus
 from agent.synthesizer import ContextSynthesizer
-from core import ask_context, guard
+from core import ask_context, guard, room_context
 from llm import get_llm
 from models.context import ProjectContext
 from models.project_index import ProjectIndex
@@ -66,11 +66,12 @@ from tool import AGENT_TOOLS, metadata
 from wire import events
 from wire.errors import friendly
 from wire.transport.base import Transport
+from workspace.config import WORKSPACE_PROJECT_NAME
 from workspace.ignore import IgnoreRules
 from workspace.index_repository import IndexRepository
 from workspace.indexer import ProjectIndexer
 from workspace.manager import SessionAlreadyExists, SessionManager
-from workspace.serialize import to_prompt_context
+from workspace.serialize import to_lightweight_context
 from workspace.synthesis_repository import SynthesisRepository
 from workspace.watcher import ProjectWatcher
 
@@ -147,12 +148,6 @@ def room_id_for_path(path: str) -> str:
     return hashlib.md5(resolved.encode("utf-8")).hexdigest()
 
 
-# A room's project is tracked in workspace/'s metadata store under a
-# session named after the room's own id (already an md5 of the path —
-# room_id_for_path()), so the two ids line up without a second lookup
-# table. Every room has exactly one project, always under this fixed name.
-WORKSPACE_PROJECT_NAME = "project"
-
 # How much of a project can drift (fraction of tracked files added,
 # removed, or content-changed) since its cached ProjectSynthesis was made
 # before a room stops trusting it silently and asks the client whether to
@@ -176,6 +171,21 @@ def stop_all_room_watchers() -> None:
 
 def _workspace_project_dir(room_id: str) -> Path:
     return SessionManager().session_root / room_id / WORKSPACE_PROJECT_NAME
+
+
+def _workspace_context(room_id: str, path: str) -> ProjectContext:
+    """The lightweight, tier-1 ProjectContext for a room's project (path
+    + one-line description per file, no full signatures — see
+    workspace/serialize.py's to_lightweight_context()), built from
+    workspace/'s cached index rather than a fresh ContextCollector walk.
+    Full per-file structural detail is available on demand via the
+    `describe` tool (tool/describe.py). Caller must ensure the workspace
+    project is already attached/reconciled (_ensure_workspace_project())
+    first."""
+    return ProjectContext(
+        path=str(Path(path).expanduser().resolve()),
+        raw=to_lightweight_context(room_id, project=WORKSPACE_PROJECT_NAME),
+    )
 
 
 def _index_diff(
@@ -296,6 +306,15 @@ class Room:
         # guarantee a fresh bootstrap gets, just without the cache-check/
         # analysis decision that only applies to a brand-new turn.
         room._ensure_workspace_project()
+        # resume() restores the analyst's own conversation, but
+        # ProjectPipeline.ask() has a *separate* precondition — it needs
+        # self.context (never persisted to rooms/{id}.json, and never set
+        # by anything else on this path) or it raises "Call start()
+        # before ask()." on the very next /prompt. Rebuilt cheaply from
+        # workspace/'s already-reconciled index instead of a fresh
+        # ContextCollector walk — this never touches the analyst's
+        # restored messages, just satisfies the pipeline-level guard.
+        room.pipeline.context = _workspace_context(room.id, room.path)
         ROOMS[room.id] = room
         return room
 
@@ -443,50 +462,52 @@ class Room:
 
     def _collect_and_start_for_resync(self) -> None:
         guard.set_project_root(self.path)
+        room_context.set_current_room(self.id)
         self._ensure_workspace_project()
-        self.pipeline.start(self.path)
+        context = _workspace_context(self.id, self.path)
+        self.pipeline.context = context
+        self.pipeline.analyst.start_session(context)
 
     def _collect_and_start(self) -> tuple[str | None, dict | None]:
         """Runs on the bootstrap worker thread. Always attaches/
         reconciles this room's project into the workspace metadata
         store first (workspace/manager.py's SessionManager, keyed by
         this room's own id) — this is what populates/refreshes per-file
-        signatures regardless of what happens next.
+        signatures regardless of what happens next — then seeds the
+        analyst's session from that same workspace-derived, lightweight
+        context (_workspace_context()) regardless of whether a cached
+        answer exists: by the time this runs, the index is always
+        already built, so there's no reason for a fresh analysis to seed
+        from anything thinner. `agent/`'s own ContextCollector/
+        tool.metadata path is no longer used here at all — see
+        docs/SESSIONS.md's "Room bootstrap integration".
 
         Returns (cached_answer, resync_info):
-          - No cached ProjectSynthesis exists: runs the pipeline's
-            normal collect+start_session (unchanged — the real
-            ContextCollector/tool.metadata, so a fresh analysis still
-            gets the fullest context available) and returns (None,
-            None); the caller must still run a real analysis.
+          - No cached ProjectSynthesis exists: returns (None, None); the
+            caller still runs a real ask() against the session just seeded.
           - A cached ProjectSynthesis exists and the project hasn't
             drifted past RESYNC_CHANGE_THRESHOLD since it was made:
-            seeds the analyst's session with the workspace's compact,
-            signature-based context instead (the actual token-saving
-            payoff — no LLM call happens here) and returns
-            (cached.answer, None).
+            returns (cached.answer, None) — no LLM call happens at all,
+            the actual token-saving payoff.
           - A cached ProjectSynthesis exists but the project HAS
-            drifted past the threshold: same compact context-seeding,
-            but returns (cached.answer, {"changed", "total", "fraction"})
-            so the caller uses the (possibly stale) cached answer for
-            now AND flags the room for a resync prompt, rather than
-            silently trusting or discarding it.
+            drifted past the threshold: returns (cached.answer,
+            {"changed", "total", "fraction"}) so the caller uses the
+            (possibly stale) cached answer for now AND flags the room
+            for a resync prompt, rather than silently trusting or
+            discarding it.
         """
         guard.set_project_root(self.path)
+        room_context.set_current_room(self.id)
         project_dir = _workspace_project_dir(self.id)
         old_index, new_index = self._ensure_workspace_project()
 
-        cached = SynthesisRepository(project_dir).load()
-        if cached is None:
-            self.pipeline.start(self.path)
-            return None, None
-
-        context = ProjectContext(
-            path=str(Path(self.path).expanduser().resolve()),
-            raw=to_prompt_context(self.id, project=WORKSPACE_PROJECT_NAME),
-        )
+        context = _workspace_context(self.id, self.path)
         self.pipeline.context = context
         self.pipeline.analyst.start_session(context)
+
+        cached = SynthesisRepository(project_dir).load()
+        if cached is None:
+            return None, None
 
         fraction = _change_fraction(old_index, new_index)
         if fraction < RESYNC_CHANGE_THRESHOLD:
@@ -609,6 +630,7 @@ class Room:
 
     def _ask_blocking(self, question: str) -> str:
         guard.set_project_root(self.path)
+        room_context.set_current_room(self.id)
         with ask_context.asker(self._ask_and_wait):
             return self.pipeline.ask(question)
 

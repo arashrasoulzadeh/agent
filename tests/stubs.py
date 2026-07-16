@@ -12,6 +12,7 @@ from pathlib import Path
 
 import websockets
 
+from models.context import ProjectContext
 from service import rooms
 from wire import app as server_app
 from workspace import config as workspace_config
@@ -59,9 +60,18 @@ class StubPipeline:
 
     def start(self, path: str = ".") -> None:
         self.started_with = path
+        self.context = ProjectContext(path=path, raw=f"ctx for {path}")
         self.analyst._messages = [{"role": "system", "content": f"ctx for {path}"}]
 
     def ask(self, question: str) -> str:
+        # Mirrors agent.ProjectPipeline.ask()'s own precondition (see its
+        # "Call start() before ask()." RuntimeError) — real code exercised
+        # this same check on service/rooms.py's Room.get_or_load() path
+        # (a resumed room never called start()) while this stub silently
+        # skipped it, which is exactly how that regression went unnoticed
+        # by this whole test suite until it was hit manually.
+        if self.context is None:
+            raise RuntimeError("Call start() before ask().")
         self.questions.append(question)
         return f"stub answer to: {question}"
 
@@ -104,17 +114,22 @@ class SlowPipeline(StubPipeline):
 
 
 class FailingPipeline:
-    """A pipeline whose project load always fails."""
+    """A pipeline whose analysis always fails.
+
+    The failure lives in ask() rather than start(): Room's real bootstrap
+    flow (service/rooms.py's _collect_and_start()) no longer calls
+    pipeline.start() at all — it seeds context itself from workspace/'s
+    lightweight index — so ask() is the one call a bootstrap turn
+    actually makes into this stub, real or not.
+    """
 
     def __init__(self, sink):
         self.sink = sink
         self.analyst = StubAnalyst()
-
-    def start(self, path: str = ".") -> None:
-        raise ValueError("bad project path")
+        self.context = None
 
     def ask(self, question: str) -> str:
-        raise AssertionError("should never be reached")
+        raise ValueError("bad project path")
 
 
 def _wrap_as_factory(pipeline_cls):
