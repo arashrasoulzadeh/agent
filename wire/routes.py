@@ -41,7 +41,22 @@ async def session_create(transport: Transport, data: dict) -> dict:
     if not path:
         raise ProtocolError("/session/create needs 'path'")
 
-    room = rooms.Room.create(path, asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+
+    # A room's id is stable per project path (room_id_for_path()), so a
+    # path already analyzed before resumes that same room — full state
+    # snapshot, like /session/resume — instead of starting a fresh one
+    # and paying for another bootstrap turn.
+    room_id = rooms.room_id_for_path(path)
+    existing = rooms.Room.get_or_load(room_id, loop)
+    if existing is not None:
+        existing.subscribe(transport)
+        # "room" alongside the full snapshot: cli.py's AgentApp reads
+        # data["room"] from every /session/create response regardless of
+        # whether it's a fresh room or (as here) a resumed one.
+        return {"room": existing.id, **existing.state_snapshot()}
+
+    room = rooms.Room.create(path, loop)
     room.subscribe(transport)
     return {"room": room.id}
 
@@ -80,6 +95,18 @@ async def reply(transport: Transport, data: dict) -> dict:
     return {"accepted": True}
 
 
+async def resync(transport: Transport, data: dict) -> dict:
+    room = _require_room(data)
+    if not room.try_consume_resync():
+        raise ProtocolError("no resync is pending for this room")
+    if data.get("confirm"):
+        if not room.try_start_turn():
+            raise ProtocolError("a turn is already running in this room")
+        # Same reason as /prompt: must not await the turn itself.
+        _fire(room.run_resync())
+    return {"accepted": True}
+
+
 async def rooms_list(transport: Transport, data: dict) -> dict:
     return {"rooms": rooms.Room.list_saved()}
 
@@ -101,5 +128,6 @@ ROUTES: dict[str, Any] = {
     "/session/resume": session_resume,
     "/prompt": prompt,
     "/reply": reply,
+    "/resync": resync,
     "/rooms/list": rooms_list,
 }

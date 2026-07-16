@@ -33,6 +33,15 @@ EXIT_COMMANDS = {"exit", "quit", "q"}
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def _resync_prompt_text(data: dict[str, Any]) -> str:
+    changed = data.get("changed", 0)
+    total = data.get("total", 0)
+    return (
+        f"? {changed} of {total} files have changed since this project was "
+        "last analyzed. Re-analyze? (y/n)"
+    )
+
+
 class ServerError(Exception):
     """The server responded with `{"ok": false}` to a request."""
 
@@ -97,6 +106,7 @@ class AgentApp(App):
         self.tokens = {"prompt": 0, "completion": 0, "total": 0}
         self.turn_active = True
         self.awaiting_reply = False
+        self.awaiting_resync = False
 
         self._spinner_frame = 0
         self._shown_hint = False
@@ -141,8 +151,20 @@ class AgentApp(App):
             else:
                 data = await self._request("/session/create", {"path": self.path})
                 self.room = data["room"]
-                # The rest (model/tools/tokens/the bootstrap answer) arrives
-                # as events — session.state lands right after this.
+                if "transcript" in data:
+                    # A room already existed for this path (room ids are
+                    # derived from the path — see service/rooms.py's
+                    # room_id_for_path()) and was resumed instead of a
+                    # fresh one being created: repaint its history exactly
+                    # like /session/resume does above.
+                    self._apply_state(data)
+                    for entry in data.get("transcript", []):
+                        self._replay(entry)
+                    if not self.turn_active:
+                        self._show_hint()
+                # Otherwise, a genuinely new room: the rest (model/tools/
+                # tokens/the bootstrap answer) arrives as events —
+                # session.state lands right after this.
         except ServerError as exc:
             self._fatal(str(exc))
 
@@ -203,6 +225,10 @@ class AgentApp(App):
             answer.show(self, data["text"])
         elif name == "error":
             error.show(self, data["message"])
+        elif name == "resync.suggested":
+            self.awaiting_resync = True
+            self.write(Text(_resync_prompt_text(data), style=style.QUESTION))
+            self.query_one("#footer-input", Input).placeholder = "y/n"
 
     def _replay(self, entry: dict[str, Any]) -> None:
         kind = entry.get("type")
@@ -216,6 +242,8 @@ class AgentApp(App):
             self.write(Text(f"? {entry['text']}", style=style.QUESTION))
         elif kind == "answer":
             answer.show(self, entry["text"])
+        elif kind == "resync_suggested":
+            self.write(Text(_resync_prompt_text(entry), style=style.QUESTION))
         self.active_tool = None  # replay never leaves a tool "in flight"
 
     def _fatal(self, message: str) -> None:
@@ -240,15 +268,17 @@ class AgentApp(App):
         self.turn_active = data.get("turn_active", self.turn_active)
         self.status_label = data.get("status_label")
         self.awaiting_reply = data.get("awaiting_reply", self.awaiting_reply)
+        self.awaiting_resync = data.get("resync_suggested", self.awaiting_resync)
         self.active_tool = data.get("active_tool")
         self.tokens = data.get("tokens", self.tokens)
 
         footer_input = self.query_one("#footer-input", Input)
-        footer_input.placeholder = (
-            "Your answer…"
-            if self.awaiting_reply
-            else "Ask a follow-up, or 'exit' to quit."
-        )
+        if self.awaiting_reply:
+            footer_input.placeholder = "Your answer…"
+        elif self.awaiting_resync:
+            footer_input.placeholder = "y/n"
+        else:
+            footer_input.placeholder = "Ask a follow-up, or 'exit' to quit."
         self.query_one("#footer-info", Static).update(
             f"project {data.get('path', self.path)}   room {self.room}"
         )
@@ -300,6 +330,12 @@ class AgentApp(App):
 
         if self.awaiting_reply:
             await self._safe_request("/reply", {"text": value})
+            return
+
+        if self.awaiting_resync:
+            self.awaiting_resync = False
+            confirm = value.lower() in ("y", "yes")
+            await self._safe_request("/resync", {"confirm": confirm})
             return
 
         if self.turn_active:

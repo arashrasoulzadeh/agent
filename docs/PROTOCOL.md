@@ -98,10 +98,11 @@ any request:
 
 | Route | `data` in | `data` out | Notes |
 | --- | --- | --- | --- |
-| `/session/create` | `{"path": "."}` | `{"room": "<uuid>"}` | Starts a new room and its bootstrap turn in the background; subscribes this connection to it. The bootstrap's progress (tool calls, the answer, `session.state`) arrives as events right after this response. |
-| `/session/resume` | `{"room": "<uuid>"}` | The room's full `session.state` payload (see below), plus `"transcript"`: every past tool call/result/message/answer/question, in order, for repainting a client's view. | Subscribes this connection to the room — loading it from `rooms/{uuid}.json` first if it isn't already live in the server's memory (e.g. the server just started). Error if no such room exists. |
-| `/prompt` | `{"room": "<uuid>", "text": "..."}` | `{"accepted": true}` | Submits a follow-up question. Error if a turn is already running in this room. |
-| `/reply` | `{"room": "<uuid>", "text": "..."}` | `{"accepted": true}` | Answers the agent's own mid-turn `ask` question. Error if the room isn't currently awaiting one. |
+| `/session/create` | `{"path": "."}` | For a path never analyzed before: `{"room": "<id>"}` — starts a new room and its bootstrap turn in the background; the bootstrap's progress (tool calls, the answer, `session.state`) arrives as events right after this response. For a path already analyzed (see below): `{"room": "<id>", ...same payload as /session/resume}` — the existing room is resumed instead, no new bootstrap turn. | Subscribes this connection to the room either way. A room's id is derived from the path itself (`service/rooms.py`'s `room_id_for_path()`, an md5 of the resolved absolute path) — analyzing the same project again always finds and resumes the same room rather than starting a new, empty one. Even a *new* room's bootstrap turn may skip the LLM entirely if `workspace/` already has a cached analysis of this project from an earlier room — see `docs/SESSIONS.md`'s "Room bootstrap integration"; a `resync.suggested` event (below) may follow if that cache looks stale. |
+| `/session/resume` | `{"room": "<id>"}` | The room's full `session.state` payload (see below), plus `"transcript"`: every past tool call/result/message/answer/question, in order, for repainting a client's view. | Subscribes this connection to the room — loading it from `rooms/{id}.json` first if it isn't already live in the server's memory (e.g. the server just started). Error if no such room exists. |
+| `/prompt` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Submits a follow-up question. Error if a turn is already running in this room. |
+| `/reply` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Answers the agent's own mid-turn `ask` question. Error if the room isn't currently awaiting one. |
+| `/resync` | `{"room": "<id>", "confirm": true\|false}` | `{"accepted": true}` | Responds to a `resync.suggested` event (below). `confirm: true` re-analyzes the project from scratch (a real LLM call) and refreshes the cached synthesis; `confirm: false` just clears the pending flag and leaves the existing (possibly stale) cached answer in place. Error if no resync is pending for this room, or a turn is already running. |
 | `/rooms/list` | `{}` | `{"rooms": [{"id", "path", "updated_at"}, ...]}` | Every room saved to disk, newest first — for a resume picker. |
 
 ## Events
@@ -112,32 +113,36 @@ clients open on the same room see the same conversation as it happens).
 
 | Event | `data` | When |
 | --- | --- | --- |
-| `session.state` | `{path, model, base_url, tools, turn_active, status_label, awaiting_reply, active_tool, tokens}` | Right after `/session/create`/`/session/resume` land as the *response*'s data too — this event fires again any time any of these fields change. It's the one generic "something about this room changed" signal; a minimal client could ignore every other event and just re-render from this one. `status_label` is `"reading the project"`, `"thinking"`, or `null`. |
+| `session.state` | `{path, model, base_url, tools, turn_active, status_label, awaiting_reply, resync_suggested, active_tool, tokens}` | Right after `/session/create`/`/session/resume` land as the *response*'s data too — this event fires again any time any of these fields change. It's the one generic "something about this room changed" signal; a minimal client could ignore every other event and just re-render from this one. `status_label` is `"reading the project"`, `"thinking"`, or `null`. |
 | `message` | `{role: "user", text}` | A prompt or reply was submitted — echoed to every client in the room, including the one that sent it, so all views append it in the same place in the transcript. |
 | `tool.call` | `{name, args}` | A tool invocation starts. |
 | `tool.result` | `{output}` | A tool invocation returns. |
 | `tokens` | `{prompt, completion, total}` | Usage updated after an LLM call. |
 | `question` | `{text}` | The agent's own mid-turn question (the `ask` tool). Answer it with `/reply`; `session.state.awaiting_reply` is `true` until then. |
 | `answer` | `{text}` | The turn's final answer, markdown. |
+| `resync.suggested` | `{changed, total, fraction}` | The project has drifted (files added/removed/content-changed) past a threshold since its cached analysis was made — the bootstrap answer shown is that (possibly stale) cache. Answer with `/resync`; `session.state.resync_suggested` is `true` until then. |
 | `error` | `{message}` | A turn failed. Already mapped from the exception type to a plain-English line (see `wire/errors.py`) — nothing further to translate client-side. |
 
 ## Rooms and persistence
 
-Every session is a room, identified by a UUID. A room owns one project's
-conversation: its pipeline, its message history, its token totals. As
-long as the server process is running, a room stays live in memory
-whether or not any client is currently attached to it — that's what lets
-a second client join an in-progress conversation with `/session/resume`
-without anything being reloaded from disk.
+Every session is a room, identified by an id derived from its project
+path (not a random one — `service/rooms.py`'s `room_id_for_path()`, an
+md5 of the resolved absolute path), so analyzing the same project again
+always finds the same room. A room owns one project's conversation: its
+pipeline, its message history, its token totals. As long as the server
+process is running, a room stays live in memory whether or not any
+client is currently attached to it — that's what lets a second client
+join an in-progress conversation with `/session/resume` without
+anything being reloaded from disk.
 
-Every room is also written to `rooms/{uuid}.json` — atomically (a temp
+Every room is also written to `rooms/{id}.json` — atomically (a temp
 file, then a rename) — after every message, tool call/result, and token
 update, not just at the end of a turn. That file is what makes a room
 resumable even after the server itself has been restarted:
 
 ```json
 {
-  "id": "<uuid>",
+  "id": "<id>",
   "path": "/abs/project/path",
   "created_at": "...", "updated_at": "...",
   "tokens": {"prompt": 0, "completion": 0, "total": 1234},

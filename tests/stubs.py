@@ -14,11 +14,15 @@ import websockets
 
 from service import rooms
 from wire import app as server_app
+from workspace import config as workspace_config
 
 
 class StubAnalyst:
     def __init__(self):
         self._messages = []
+
+    def start_session(self, context) -> None:
+        self._messages = [{"role": "system", "content": f"ctx for {context.path}"}]
 
     def resume(self, messages):
         self._messages = messages
@@ -26,6 +30,15 @@ class StubAnalyst:
     @property
     def messages(self):
         return self._messages
+
+
+class StubSynthesizer:
+    """Never a real LLM call — canned, instant text, mirroring
+    agent.synthesizer.ContextSynthesizer's shape (`.synthesize(answer,
+    context)`) just enough for service.rooms.Room._cache_synthesis()."""
+
+    def synthesize(self, answer: str, context) -> str:
+        return f"stub synthesis of: {answer}"
 
 
 class StubPipeline:
@@ -39,6 +52,7 @@ class StubPipeline:
     def __init__(self, sink):
         self.sink = sink
         self.analyst = StubAnalyst()
+        self.synthesizer = StubSynthesizer()
         self.context = None
         self.started_with = None
         self.questions: list[str] = []
@@ -116,22 +130,40 @@ def _wrap_as_factory(pipeline_cls):
 
 
 @asynccontextmanager
-async def running_server(pipeline_factory=StubPipeline):
+async def running_server(pipeline_factory=StubPipeline, base_dir=None):
     """A real websockets server on an OS-assigned port, backed by a temp
     rooms/ directory and the given (stub) pipeline class. Yields the
-    ws:// URI to connect to."""
+    ws:// URI to connect to.
+
+    Also redirects workspace/config.py's SESSION_ROOT into the same temp
+    base dir — Room._ensure_workspace_project() (service/rooms.py) always
+    touches a real SessionManager(), so without this every test would
+    silently read/write the real ~/.agent-session-root on disk.
+
+    `base_dir`, if given, is used as-is and NOT cleaned up on exit — pass
+    the same directory to two separate `running_server()` calls (like
+    test_resume_loads_from_disk_when_not_live already does for rooms/) to
+    simulate a server restart that still sees the same on-disk cache.
+    Omit it (the default) for a fresh, self-cleaning temp dir per call.
+    """
     original_factory = rooms.pipeline_factory
-    original_dir = rooms.ROOMS_DIR
+    original_rooms_dir = rooms.ROOMS_DIR
+    original_session_root = workspace_config.SESSION_ROOT
     rooms.ROOMS.clear()
     rooms.pipeline_factory = _wrap_as_factory(pipeline_factory)
-    tmp_rooms = Path(tempfile.mkdtemp()) / "rooms"
-    rooms.ROOMS_DIR = tmp_rooms
+    owns_base_dir = base_dir is None
+    base = Path(base_dir) if base_dir is not None else Path(tempfile.mkdtemp())
+    rooms.ROOMS_DIR = base / "rooms"
+    workspace_config.SESSION_ROOT = base / "sessions"
     try:
         async with websockets.serve(server_app.handle, "127.0.0.1", 0) as server:
             port = server.sockets[0].getsockname()[1]
             yield f"ws://127.0.0.1:{port}"
     finally:
+        rooms.stop_all_room_watchers()
         rooms.ROOMS.clear()
         rooms.pipeline_factory = original_factory
-        rooms.ROOMS_DIR = original_dir
-        shutil.rmtree(tmp_rooms.parent, ignore_errors=True)
+        rooms.ROOMS_DIR = original_rooms_dir
+        workspace_config.SESSION_ROOT = original_session_root
+        if owns_base_dir:
+            shutil.rmtree(base, ignore_errors=True)

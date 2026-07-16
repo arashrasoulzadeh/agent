@@ -37,6 +37,13 @@ QUESTION = "question"
 ANSWER = "answer"
 ERROR = "error"
 
+# The project has drifted too much (service/rooms.py's
+# RESYNC_CHANGE_THRESHOLD) since its cached analysis was made for the
+# room to keep trusting it silently — the client should ask the user
+# whether to re-analyze and answer with a /resync request.
+# data: {"changed": int, "total": int, "fraction": float}
+RESYNC_SUGGESTED = "resync.suggested"
+
 
 async def broadcast(
     clients: set[Transport], room_id: str, name: str, data: dict

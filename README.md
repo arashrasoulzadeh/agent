@@ -353,6 +353,33 @@ exact contract, and a worked example (`extra/_example_hook.py`,
 `extra/_example_logging_hook.py` — both underscore-prefixed so they're
 inspectable but never auto-loaded).
 
+### Sessions
+
+`workspace/` (console script `agent-session`) tracks one or more project
+roots' metadata — path, size, mtime, content hash, detected language,
+and (for Python today, via the stdlib `ast` module) automatically
+extracted function/class/variable *signatures* plus a one-line docstring
+summary per file, never source content or function bodies — inside a
+named session, kept in sync by a background file watcher instead of
+re-reading a project from scratch every run:
+
+```bash
+agent-session create test_session
+agent-session attach test_session ~/code/my-project --name p1
+agent-session load test_session      # foreground; watches p1 for changes
+agent-session serialize test_session --project p1   # compact LLM-ready context
+```
+
+`service/rooms.py` also uses this store directly at room-bootstrap time:
+every room attaches its project here (keyed by the room's own id) and
+checks for a cached prior analysis before ever calling the LLM — a
+repeat run of an unchanged project answers instantly from cache, and a
+project that's drifted too much since that cache was made prompts the
+client for a `/resync` instead of silently trusting or discarding it.
+See [`docs/SESSIONS.md`](docs/SESSIONS.md) for the on-disk layout, the
+metadata schema, the room-bootstrap integration, and the invariants that
+keep it crash-safe and race-free.
+
 ### Safety
 
 Two restrictions are enforced in `core/guard.py`, so every tool inherits them:

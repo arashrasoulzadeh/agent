@@ -6,8 +6,12 @@ never touches the network or spends a real API token.
 
 import asyncio
 import json
+import os
+import shutil
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 
 import websockets
 
@@ -19,6 +23,8 @@ from tests.stubs import (
     ToolCallingPipeline,
     running_server,
 )
+from workspace.index_repository import IndexRepository
+from workspace.synthesis_repository import SynthesisRepository
 
 
 async def recv_until(ws, predicate, timeout=5):
@@ -30,6 +36,18 @@ async def recv_until(ws, predicate, timeout=5):
             msg = json.loads(await ws.recv())
             if predicate(msg):
                 return msg
+
+
+async def wait_until(predicate, timeout=2.0, interval=0.02):
+    """Poll `predicate` until it's truthy. Room._cache_synthesis() runs
+    as a fire-and-forget tail step after a turn's `answer` event is
+    already sent (service/rooms.py's _run_turn()) — deliberately, so
+    caching never blocks turn_active from clearing — so a test that
+    needs the cache write to have landed can't just react to the
+    `answer` event; it has to wait for the write itself."""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(interval)
 
 
 async def send_request(ws, route, data=None, room=None):
@@ -57,6 +75,32 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
             state = await recv_until(ws, lambda m: m.get("event") == "session.state")
             self.assertFalse(state["data"]["turn_active"])
             self.assertEqual(state["data"]["path"], ".")
+
+    async def test_create_with_same_path_resumes_instead_of_creating_new(self):
+        # Room ids are derived from the (resolved) path (service/rooms.py's
+        # room_id_for_path()), not random - creating "twice" for the same
+        # path must resume the first room, not spend a second bootstrap.
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            first = await send_request(ws, "/session/create", {"path": "some/project"})
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            second = await send_request(ws, "/session/create", {"path": "some/project"})
+
+        self.assertEqual(first["room"], second["room"])
+        # A resumed room's /session/create response looks like a full
+        # state snapshot (matching /session/resume), not just {"room": id}.
+        self.assertIn("transcript", second)
+        self.assertTrue(second["transcript"])
+
+    async def test_create_with_different_paths_gets_different_rooms(self):
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            first = await send_request(ws, "/session/create", {"path": "project-a"})
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            second = await send_request(ws, "/session/create", {"path": "project-b"})
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+        self.assertNotEqual(first["room"], second["room"])
 
     async def test_prompt_runs_a_tool_and_answers(self):
         async with running_server(ToolCallingPipeline) as uri, websockets.connect(
@@ -188,6 +232,247 @@ class TestPersistenceAndResume(unittest.IsolatedAsyncioTestCase):
 
             listing = await send_request(ws, "/rooms/list")
             self.assertTrue(any(r["id"] == room_id for r in listing["rooms"]))
+
+
+class TestRoomIdForPath(unittest.TestCase):
+    def test_same_path_produces_the_same_id(self):
+        self.assertEqual(
+            rooms.room_id_for_path("some/project"),
+            rooms.room_id_for_path("some/project"),
+        )
+
+    def test_different_paths_produce_different_ids(self):
+        self.assertNotEqual(
+            rooms.room_id_for_path("project-a"),
+            rooms.room_id_for_path("project-b"),
+        )
+
+    def test_relative_and_equivalent_absolute_path_produce_the_same_id(self):
+        self.assertEqual(
+            rooms.room_id_for_path("."),
+            rooms.room_id_for_path(os.getcwd()),
+        )
+
+
+class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
+    """The room-bootstrap <-> workspace/ integration: a cached
+    ProjectSynthesis lets a brand-new room skip the LLM entirely, and a
+    project that's drifted too much since that cache was made gets a
+    resync.suggested event instead of a silent stale answer (see
+    service/rooms.py's _collect_and_start()/RESYNC_CHANGE_THRESHOLD)."""
+
+    def setUp(self):
+        self.base_dir = Path(tempfile.mkdtemp())
+        self.project_dir = Path(tempfile.mkdtemp())
+        for i in range(5):
+            (self.project_dir / f"mod{i}.py").write_text(
+                f"def f{i}():\n    return {i}\n"
+            )
+
+    def tearDown(self):
+        shutil.rmtree(self.base_dir, ignore_errors=True)
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+
+    def _cache_dir(self, room_id: str) -> Path:
+        return self.base_dir / "sessions" / room_id / rooms.WORKSPACE_PROJECT_NAME
+
+    def _drop_room_file(self, room_id: str) -> None:
+        """Simulates a room whose own conversation was reset (e.g.
+        rooms/{id}.json deleted) while the workspace cache survives —
+        the scenario Room._cache_synthesis()'s docstring describes as
+        the payoff case: the *next* room for this same path can skip the
+        LLM even though it's a brand-new Room object."""
+        (self.base_dir / "rooms" / f"{room_id}.json").unlink()
+
+    async def test_bootstrap_populates_index_and_synthesis_cache(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            answer = await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            cache_dir = self._cache_dir(room_id)
+            index = IndexRepository(cache_dir).load()
+            self.assertIsNotNone(index)
+            self.assertEqual(len(index.files), 5)
+            self.assertTrue(
+                all(
+                    f.derived and f.derived.get("signatures")
+                    for f in index.files.values()
+                )
+            )
+
+            await wait_until(
+                lambda: SynthesisRepository(cache_dir).load() is not None
+            )
+            synthesis = SynthesisRepository(cache_dir).load()
+            self.assertEqual(synthesis.answer, answer["data"]["text"])
+            self.assertEqual(synthesis.file_count, 5)
+
+    async def test_second_bootstrap_after_reset_uses_cache_without_llm(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            first_answer = await recv_until(ws, lambda m: m.get("event") == "answer")
+            await wait_until(
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
+                is not None
+            )
+
+        self._drop_room_file(room_id)
+
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            self.assertEqual(data["room"], room_id)
+            second_answer = await recv_until(ws, lambda m: m.get("event") == "answer")
+            self.assertEqual(
+                second_answer["data"]["text"], first_answer["data"]["text"]
+            )
+
+            state = await recv_until(ws, lambda m: m.get("event") == "session.state")
+            self.assertFalse(state["data"]["resync_suggested"])
+
+            live_room = rooms.ROOMS[room_id]
+            self.assertIsNone(live_room.pipeline.started_with)
+            self.assertEqual(live_room.pipeline.questions, [])
+
+    async def test_resync_suggested_when_project_has_drifted_past_threshold(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            await wait_until(
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
+                is not None
+            )
+
+        self._drop_room_file(room_id)
+        # 2 of 5 tracked files changed content -> 40% drift, above the
+        # default 20% RESYNC_CHANGE_THRESHOLD.
+        (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
+        (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
+
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            self.assertEqual(data["room"], room_id)
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            resync_event = await recv_until(
+                ws, lambda m: m.get("event") == "resync.suggested"
+            )
+            self.assertEqual(resync_event["data"]["changed"], 2)
+            self.assertEqual(resync_event["data"]["total"], 5)
+            self.assertAlmostEqual(resync_event["data"]["fraction"], 0.4)
+
+            live_room = rooms.ROOMS[room_id]
+            self.assertTrue(live_room.resync_suggested)
+            # Still cache-only: the drift is flagged, but the LLM hasn't
+            # been called yet — that's what a confirmed /resync is for.
+            self.assertIsNone(live_room.pipeline.started_with)
+
+    async def test_resync_confirm_reruns_analysis_and_updates_cache(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            await wait_until(
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
+                is not None
+            )
+
+        self._drop_room_file(room_id)
+        (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
+        (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
+
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            await recv_until(ws, lambda m: m.get("event") == "resync.suggested")
+
+            await send_request(ws, "/resync", {"confirm": True}, room=room_id)
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            live_room = rooms.ROOMS[room_id]
+            self.assertEqual(live_room.pipeline.started_with, str(self.project_dir))
+            self.assertEqual(live_room.pipeline.questions, [rooms.BOOTSTRAP_QUERY])
+            self.assertFalse(live_room.resync_suggested)
+
+            synthesis = SynthesisRepository(self._cache_dir(room_id)).load()
+            self.assertEqual(synthesis.file_count, 5)
+
+    async def test_resync_declined_leaves_cache_untouched_and_clears_flag(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            await wait_until(
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
+                is not None
+            )
+
+        self._drop_room_file(room_id)
+        (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
+        (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
+
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+            await recv_until(ws, lambda m: m.get("event") == "resync.suggested")
+
+            await send_request(ws, "/resync", {"confirm": False}, room=room_id)
+
+            live_room = rooms.ROOMS[room_id]
+            self.assertFalse(live_room.resync_suggested)
+            self.assertIsNone(live_room.pipeline.started_with)
+
+    async def test_resync_rejected_when_none_is_pending(self):
+        async with running_server(
+            StubPipeline, base_dir=self.base_dir
+        ) as uri, websockets.connect(uri) as ws:
+            data = await send_request(
+                ws, "/session/create", {"path": str(self.project_dir)}
+            )
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            with self.assertRaises(AssertionError):
+                await send_request(ws, "/resync", {"confirm": True}, room=room_id)
 
 
 if __name__ == "__main__":

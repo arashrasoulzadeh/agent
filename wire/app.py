@@ -101,3 +101,7 @@ async def serve() -> None:
             logger.info("shutdown requested, closing...")
     finally:
         lifecycle.stop_all(LIFECYCLE_MODULES)
+        # Each room's background ProjectWatcher (service/rooms.py) needs
+        # the same graceful stop a module does — flushing any pending
+        # debounced file-metadata change before the process exits.
+        rooms.stop_all_room_watchers()

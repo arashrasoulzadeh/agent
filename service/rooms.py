@@ -1,4 +1,10 @@
-"""Rooms: one per project session, persisted to rooms/{uuid}.json.
+"""Rooms: one per project session, persisted to rooms/{id}.json.
+
+A room's id is derived from its project path (room_id_for_path(): an
+md5 of the resolved absolute path), not a random uuid — so analyzing the
+same project again finds the same room and resumes it instead of
+starting a new, empty one (see wire/routes.py's session_create and
+Room.create() below).
 
 This is the use-case layer: `Room` owns a `ProjectPipeline` (agent/), the
 set of `Transport`s (wire/transport/base.py) currently subscribed to it,
@@ -30,9 +36,10 @@ a different project, potentially — stay isolated from one another.
 """
 
 import asyncio
+import hashlib
+import logging
 import os
 import queue
-import uuid as uuid_lib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,11 +58,23 @@ from agent.events import LoggingStageObserver, StageEventBus
 from agent.synthesizer import ContextSynthesizer
 from core import ask_context, guard
 from llm import get_llm
+from models.context import ProjectContext
+from models.project_index import ProjectIndex
+from models.project_synthesis import ProjectSynthesis
 from service.room_repository import RoomRepository
 from tool import AGENT_TOOLS, metadata
 from wire import events
 from wire.errors import friendly
 from wire.transport.base import Transport
+from workspace.ignore import IgnoreRules
+from workspace.index_repository import IndexRepository
+from workspace.indexer import ProjectIndexer
+from workspace.manager import SessionAlreadyExists, SessionManager
+from workspace.serialize import to_prompt_context
+from workspace.synthesis_repository import SynthesisRepository
+from workspace.watcher import ProjectWatcher
+
+logger = logging.getLogger("service.rooms")
 
 TOOL_NAMES = [tool.name for tool in AGENT_TOOLS]
 
@@ -114,6 +133,79 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def room_id_for_path(path: str) -> str:
+    """A stable room id derived from a project path, not a random one.
+
+    Resolved to an absolute, canonical path first, so "." and the
+    equivalent absolute path (or a path reached through a symlink) hash
+    to the same id. This is what makes analyzing the same project twice
+    resume the existing conversation automatically (see Room.create())
+    instead of piling up a fresh, randomly-named room — and a fresh
+    bootstrap LLM call — every single run.
+    """
+    resolved = str(Path(path).expanduser().resolve())
+    return hashlib.md5(resolved.encode("utf-8")).hexdigest()
+
+
+# A room's project is tracked in workspace/'s metadata store under a
+# session named after the room's own id (already an md5 of the path —
+# room_id_for_path()), so the two ids line up without a second lookup
+# table. Every room has exactly one project, always under this fixed name.
+WORKSPACE_PROJECT_NAME = "project"
+
+# How much of a project can drift (fraction of tracked files added,
+# removed, or content-changed) since its cached ProjectSynthesis was made
+# before a room stops trusting it silently and asks the client whether to
+# re-analyze instead (see Room._collect_and_start(), the `resync.suggested`
+# event, and wire/routes.py's /resync).
+RESYNC_CHANGE_THRESHOLD = 0.2
+
+# Tracks each room's background ProjectWatcher (workspace/watcher.py) for
+# the life of the server process — started the first time a room's
+# project is attached (Room._ensure_watcher()), stopped by
+# stop_all_room_watchers() in wire/app.py's serve() shutdown, alongside
+# module lifecycle.stop_all().
+ROOM_WATCHERS: dict[str, ProjectWatcher] = {}
+
+
+def stop_all_room_watchers() -> None:
+    for watcher in ROOM_WATCHERS.values():
+        watcher.stop()
+    ROOM_WATCHERS.clear()
+
+
+def _workspace_project_dir(room_id: str) -> Path:
+    return SessionManager().session_root / room_id / WORKSPACE_PROJECT_NAME
+
+
+def _index_diff(
+    old_index: ProjectIndex | None, new_index: ProjectIndex
+) -> tuple[int, int]:
+    """(changed_count, total_count) — changed counts files in
+    `new_index` that are new or content-changed relative to
+    `old_index`, plus files `old_index` had that `new_index` no longer
+    does."""
+    old_files = old_index.files if old_index is not None else {}
+    new_files = new_index.files
+    changed = sum(
+        1
+        for rel, meta in new_files.items()
+        if old_files.get(rel) is None or old_files[rel].sha256 != meta.sha256
+    )
+    removed = sum(1 for rel in old_files if rel not in new_files)
+    total = max(len(old_files), len(new_files), 1)
+    return changed + removed, total
+
+
+def _change_fraction(old_index: ProjectIndex | None, new_index: ProjectIndex) -> float:
+    """1.0 (treat as "fully changed") when there's no prior baseline to
+    compare against at all."""
+    if old_index is None or not old_index.files:
+        return 1.0
+    changed, total = _index_diff(old_index, new_index)
+    return changed / total
+
+
 class RoomSink:
     """Reports one room's tool activity as broadcast protocol events."""
 
@@ -146,6 +238,7 @@ class Room:
         self.clients: set[Transport] = set()
         self.turn_active = False
         self.awaiting_reply = False
+        self.resync_suggested = False
         self.status_label: str | None = None
         self.active_tool: str | None = None
         self.tokens = {"prompt": 0, "completion": 0, "total": 0}
@@ -168,7 +261,12 @@ class Room:
 
     @classmethod
     def create(cls, path: str, loop: asyncio.AbstractEventLoop) -> "Room":
-        room = cls(str(uuid_lib.uuid4()), path, loop)
+        """Always builds a brand-new room and kicks off its bootstrap
+        turn — callers that want "resume if this path was already
+        analyzed, otherwise create" (i.e. every real caller; see
+        wire/routes.py's session_create) should check get_or_load()
+        with room_id_for_path(path) first and only fall back to this."""
+        room = cls(room_id_for_path(path), path, loop)
         room.turn_active = True  # claimed up front; run_bootstrap() clears it
         room.status_label = "reading the project"
         ROOMS[room.id] = room
@@ -193,6 +291,11 @@ class Room:
         room.created_at = raw.get("created_at", room.created_at)
         room.transcript = raw.get("transcript", [])
         room.pipeline.analyst.resume(messages_from_dict(raw.get("messages", [])))
+        # Refreshes file metadata/signatures and (re)starts the watcher
+        # for a room resumed after a server restart — the same freshness
+        # guarantee a fresh bootstrap gets, just without the cache-check/
+        # analysis decision that only applies to a brand-new turn.
+        room._ensure_workspace_project()
         ROOMS[room.id] = room
         return room
 
@@ -248,6 +351,7 @@ class Room:
             "turn_active": self.turn_active,
             "status_label": self.status_label,
             "awaiting_reply": self.awaiting_reply,
+            "resync_suggested": self.resync_suggested,
             "active_tool": self.active_tool,
             "tokens": self.tokens,
             "transcript": self.transcript,
@@ -295,22 +399,175 @@ class Room:
         self.awaiting_reply = False
         return True
 
+    def try_consume_resync(self) -> bool:
+        if not self.resync_suggested:
+            return False
+        self.resync_suggested = False
+        return True
+
     async def run_bootstrap(self) -> None:
         """Assumes try_start_turn() already succeeded (Room.create() sets
         turn_active — and status_label — itself, so a client can't /prompt
         before this runs)."""
         try:
-            await asyncio.to_thread(self._collect_and_start)
+            cached_answer, resync_info = await asyncio.to_thread(
+                self._collect_and_start
+            )
         except Exception as exc:
             self.turn_active = False
             self.status_label = None
             await self._emit(events.ERROR, {"message": friendly(exc)})
             return
-        await self._run_turn(BOOTSTRAP_QUERY)
 
-    def _collect_and_start(self) -> None:
+        if cached_answer is not None:
+            if resync_info is not None:
+                self.resync_suggested = True
+            await self._finish_turn_with_answer(cached_answer, resync_info)
+            return
+
+        await self._run_turn(BOOTSTRAP_QUERY, cache_after=True)
+
+    async def run_resync(self) -> None:
+        """Assumes try_start_turn() already succeeded — the confirmed
+        response to a `resync.suggested` event (see wire/routes.py's
+        /resync). Always runs a fresh analysis, bypassing the cache
+        check entirely, unlike run_bootstrap()."""
+        try:
+            await asyncio.to_thread(self._collect_and_start_for_resync)
+        except Exception as exc:
+            self.turn_active = False
+            self.status_label = None
+            await self._emit(events.ERROR, {"message": friendly(exc)})
+            return
+        await self._run_turn(BOOTSTRAP_QUERY, cache_after=True)
+
+    def _collect_and_start_for_resync(self) -> None:
         guard.set_project_root(self.path)
+        self._ensure_workspace_project()
         self.pipeline.start(self.path)
+
+    def _collect_and_start(self) -> tuple[str | None, dict | None]:
+        """Runs on the bootstrap worker thread. Always attaches/
+        reconciles this room's project into the workspace metadata
+        store first (workspace/manager.py's SessionManager, keyed by
+        this room's own id) — this is what populates/refreshes per-file
+        signatures regardless of what happens next.
+
+        Returns (cached_answer, resync_info):
+          - No cached ProjectSynthesis exists: runs the pipeline's
+            normal collect+start_session (unchanged — the real
+            ContextCollector/tool.metadata, so a fresh analysis still
+            gets the fullest context available) and returns (None,
+            None); the caller must still run a real analysis.
+          - A cached ProjectSynthesis exists and the project hasn't
+            drifted past RESYNC_CHANGE_THRESHOLD since it was made:
+            seeds the analyst's session with the workspace's compact,
+            signature-based context instead (the actual token-saving
+            payoff — no LLM call happens here) and returns
+            (cached.answer, None).
+          - A cached ProjectSynthesis exists but the project HAS
+            drifted past the threshold: same compact context-seeding,
+            but returns (cached.answer, {"changed", "total", "fraction"})
+            so the caller uses the (possibly stale) cached answer for
+            now AND flags the room for a resync prompt, rather than
+            silently trusting or discarding it.
+        """
+        guard.set_project_root(self.path)
+        project_dir = _workspace_project_dir(self.id)
+        old_index, new_index = self._ensure_workspace_project()
+
+        cached = SynthesisRepository(project_dir).load()
+        if cached is None:
+            self.pipeline.start(self.path)
+            return None, None
+
+        context = ProjectContext(
+            path=str(Path(self.path).expanduser().resolve()),
+            raw=to_prompt_context(self.id, project=WORKSPACE_PROJECT_NAME),
+        )
+        self.pipeline.context = context
+        self.pipeline.analyst.start_session(context)
+
+        fraction = _change_fraction(old_index, new_index)
+        if fraction < RESYNC_CHANGE_THRESHOLD:
+            return cached.answer, None
+
+        changed, total = _index_diff(old_index, new_index)
+        return cached.answer, {"changed": changed, "total": total, "fraction": fraction}
+
+    def _ensure_workspace_project(self) -> tuple[ProjectIndex | None, ProjectIndex]:
+        """Attach (idempotent) this room's project into the workspace
+        metadata store, keyed by the room's own id, reconciling its file
+        index synchronously — the source of the "file metadata stays
+        fresh" guarantee every time a room becomes active, whether
+        freshly created, resumed, or re-bootstrapped. Also ensures a
+        background ProjectWatcher is running for it. Returns
+        (index_before_this_reconcile_or_None, index_after) so callers
+        can measure how much changed.
+        """
+        project_dir = _workspace_project_dir(self.id)
+        old_index = IndexRepository(project_dir).load()
+
+        manager = SessionManager()
+        try:
+            manager.create(self.id)
+        except SessionAlreadyExists:
+            pass
+        manager.attach(self.id, self.path, project_name=WORKSPACE_PROJECT_NAME)
+
+        new_index = IndexRepository(project_dir).load()
+        self._ensure_watcher(project_dir, new_index)
+        return old_index, new_index
+
+    def _ensure_watcher(self, project_dir: Path, index: ProjectIndex) -> None:
+        if self.id in ROOM_WATCHERS:
+            return
+        project_root = Path(self.path).expanduser().resolve()
+        ignore_rules = IgnoreRules(project_root)
+        indexer = ProjectIndexer(WORKSPACE_PROJECT_NAME, project_root, ignore_rules)
+        watcher = ProjectWatcher(indexer, index, IndexRepository(project_dir))
+        watcher.start()
+        ROOM_WATCHERS[self.id] = watcher
+
+    def _cache_synthesis(self, answer: str) -> None:
+        """Runs the synthesize stage directly (ProjectPipeline.ask()
+        already ran analyze; this doesn't repeat it) and persists the
+        result, so the next brand-new room for this same project (no
+        resumable rooms/{id}.json — e.g. after a reset) can skip the LLM
+        entirely — see _collect_and_start()."""
+        synthesized = self.pipeline.synthesizer.synthesize(
+            answer, self.pipeline.context
+        )
+        project_dir = _workspace_project_dir(self.id)
+        index = IndexRepository(project_dir).load()
+        SynthesisRepository(project_dir).save(
+            ProjectSynthesis(
+                answer=answer,
+                synthesized=synthesized,
+                created_at=_now(),
+                file_count=len(index.files) if index is not None else 0,
+            )
+        )
+
+    async def _finish_turn_with_answer(
+        self, answer: str, resync_info: dict | None
+    ) -> None:
+        """Delivers `answer` as this turn's result without running the
+        LLM — used when a cached ProjectSynthesis already covers this
+        bootstrap (see _collect_and_start()). Mirrors _run_turn()'s
+        bookkeeping (transcript/ANSWER event/state/save) so a cache hit
+        looks identical to a fresh answer to the client, just instant.
+        """
+        self.append_transcript({"type": "answer", "text": answer})
+        await self._emit(events.ANSWER, {"text": answer})
+        if resync_info is not None:
+            self.append_transcript({"type": "resync_suggested", **resync_info})
+            await self._emit(events.RESYNC_SUGGESTED, resync_info)
+        self.turn_active = False
+        self.status_label = None
+        self.active_tool = None
+        await self.broadcast_state()
+        self.save()
 
     async def run_prompt(self, text: str) -> None:
         """Assumes try_start_turn() already succeeded."""
@@ -320,7 +577,8 @@ class Room:
         await self._emit(events.MESSAGE, {"role": "user", "text": text})
         await self._run_turn(text)
 
-    async def _run_turn(self, question: str) -> None:
+    async def _run_turn(self, question: str, cache_after: bool = False) -> None:
+        answer: str | None = None
         try:
             answer = await asyncio.to_thread(self._ask_blocking, question)
         except Exception as exc:
@@ -334,6 +592,20 @@ class Room:
             self.active_tool = None
             await self.broadcast_state()
             self.save()
+
+        # Caching happens after the turn is already marked finished — it's
+        # an enhancement, not part of this turn's own correctness, and
+        # must not hold turn_active True (and so block a follow-up
+        # /prompt) while it writes to disk. A synthesis failure here must
+        # not surface as an unhandled task exception either (run_bootstrap()
+        # isn't awaited by anything that would catch it).
+        if cache_after and answer is not None:
+            try:
+                await asyncio.to_thread(self._cache_synthesis, answer)
+            except Exception:
+                logger.exception(
+                    "failed to cache project synthesis for room %s", self.id
+                )
 
     def _ask_blocking(self, question: str) -> str:
         guard.set_project_root(self.path)
