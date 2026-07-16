@@ -1,7 +1,7 @@
-# Writing a module
+# Writing a tool
 
-A module is one `.py` file under `modules/`. There is no registration
-step: drop the file in, and `core/registry.py` picks it up the next time
+A tool is one `.py` file under `tool/`. There is no registration
+step: drop the file in, and `tool/registry.py` picks it up the next time
 the process starts. This document covers both halves of the contract —
 adding a tool, and (optionally) hooking into the server's lifecycle — and
 how discovery actually works under the hood.
@@ -9,7 +9,7 @@ how discovery actually works under the hood.
 ## The minimum: a tool
 
 ```python
-# modules/word_count.py
+# tool/word_count.py
 """Counts words in a file."""
 
 from langchain_core.tools import tool
@@ -34,16 +34,16 @@ def word_count(path: str) -> str:
     return f"{len(text.split())} words"
 ```
 
-That's the whole thing. `core/registry.py` imports every file under
-`modules/` (except `__init__.py` and anything starting with `_`), finds
+That's the whole thing. `tool/registry.py` imports every file under
+`tool/` (except `__init__.py` and anything starting with `_`), finds
 any LangChain `@tool` defined at module level, and includes it in
-`AGENT_TOOLS` — the list `application/rooms.py`'s
+`AGENT_TOOLS` — the list `service/rooms.py`'s
 `default_pipeline_factory` hands to the analyst. Nothing in
-`modules/__init__.py`, `core/registry.py`, or anywhere else needs to
+`tool/__init__.py`, `tool/registry.py`, or anywhere else needs to
 change.
 
-A few things worth matching from the existing tools (see `modules/ls.py`,
-`modules/cat.py`, ...):
+A few things worth matching from the existing tools (see `tool/ls.py`,
+`tool/cat.py`, ...):
 
 - Route filesystem access through `core/guard.py`'s `resolve_in_root()` /
   `is_secret()` — that's what confines every tool to the project folder
@@ -59,7 +59,7 @@ A few things worth matching from the existing tools (see `modules/ls.py`,
 ### Opting out of the default toolset
 
 Set a module-level flag to keep a tool importable but out of
-`AGENT_TOOLS` (see `modules/delete.py`, `modules/metadata.py`):
+`AGENT_TOOLS` (see `tool/delete.py`, `tool/metadata.py`):
 
 ```python
 AGENT_TOOL = False
@@ -67,20 +67,26 @@ AGENT_TOOL = False
 
 ## How a result reaches the client, without this file knowing
 
-A tool's return value becomes a LangChain `ToolMessage`. `domain/analyst.py`
-reports it to whatever `Sink` it was given (`domain/sink.py`) — in the
-real server, that's `application/rooms.py`'s `RoomSink`, which turns it
+A tool's return value becomes a LangChain `ToolMessage`. `agent/analyst.py`
+reports it to whatever `Sink` it was given (`agent/sink.py`) — in the
+real server, that's `service/rooms.py`'s `RoomSink`, which turns it
 into a `tool.result` protocol event and broadcasts it through every
-subscribed `Transport` (`infrastructure/transport/base.py`). A module
-never imports `application/` or `interfaces/`, never touches a
+subscribed `Transport` (`wire/transport/base.py`). A tool file
+never imports `service/` or `wire/`, never touches a
 `Transport`, and works identically whether the room is being watched
 over WebSocket today or REST/gRPC later — that's the whole point of the
 transport-agnostic boundary. See `docs/PROTOCOL.md` for the wire format
 your tool's output ends up in.
 
+Separately, `hooks/` + `extra/` (see [`docs/HOOKS.md`](HOOKS.md)) let
+outside code observe or rewrite a tool call/result in flight, or add an
+entirely new tool to `AGENT_TOOLS`, without editing `tool/` at all — a
+different, more general extension point than the one this document
+covers.
+
 ## The optional half: lifecycle hooks
 
-Skip this section entirely unless your module has state to set up or
+Skip this section entirely unless your tool has state to set up or
 tear down — a connection pool, a background task, a cache warmed from
 disk. A plain `@tool` function needs none of it.
 
@@ -88,7 +94,7 @@ Expose a module-level `MODULE` object implementing any subset of three
 methods (`core/module.py`):
 
 ```python
-# modules/rate_limiter.py
+# tool/rate_limiter.py
 """A tool wrapped around a shared, rate-limited HTTP client."""
 
 import httpx
@@ -129,9 +135,9 @@ def fetch_url(url: str) -> str:
     return response.text
 ```
 
-`core/registry.py` discovers `MODULE` via `hasattr`, not `isinstance` —
+`tool/registry.py` discovers `MODULE` via `hasattr`, not `isinstance` —
 implementing only `stop()` (say, to flush a cache on shutdown) is exactly
-as valid as implementing all three. `interfaces/ws/app.py` calls every
+as valid as implementing all three. `wire/app.py` calls every
 discovered module's `init(config)` then `start()` before accepting
 connections, and `stop()` once on graceful shutdown (SIGINT/SIGTERM). One
 module's hook raising is logged and skipped — it can't stop another
@@ -142,27 +148,30 @@ defensively (see the `if self.client is not None` check above).
 
 ## How discovery actually works
 
-`core/registry.discover()`:
+`tool/registry.discover()`:
 
-1. Lists every `.py` file directly under `modules/` (`pkgutil.iter_modules`),
-   skipping `__init__.py` and anything starting with `_`.
+1. Lists every `.py` file directly under `tool/` (via
+   `core/discovery.py`'s generic `import_all()`, which does the
+   `pkgutil.iter_modules` scan), skipping `__init__.py` and anything
+   starting with `_`.
 2. Imports each one exactly once (`importlib.import_module`).
 3. Collects every module-level `BaseTool` instance into `all_tools`, and
    into `agent_tools` too unless the module set `AGENT_TOOL = False`.
 4. Collects a module-level `MODULE` object into `lifecycle_modules` if it
    implements at least one of `init`/`start`/`stop`.
 
-`modules/__init__.py` runs this once at import time and exposes the
-results as `AGENT_TOOLS` and `LIFECYCLE_MODULES` — both plain module
-attributes, nothing to call.
+`tool/__init__.py` runs this once at import time, additionally routes
+the collected tool list through the `on_tools_collected` hook (see
+[`docs/HOOKS.md`](HOOKS.md)), and exposes the results as `AGENT_TOOLS`
+and `LIFECYCLE_MODULES` — both plain module attributes, nothing to call.
 
-## Testing a module
+## Testing a tool
 
 Import it and call `.invoke({...})` directly — a LangChain tool doesn't
 need a server or a room to run:
 
 ```python
-from modules.word_count import word_count
+from tool.word_count import word_count
 
 def test_word_count():
     # assuming a fixture file exists inside the confined project root
@@ -170,4 +179,4 @@ def test_word_count():
 ```
 
 See `tests/test_registry.py` for how discovery itself is tested (against
-a temporary modules directory, so it never touches the real `modules/`).
+a temporary tool directory, so it never touches the real `tool/`).

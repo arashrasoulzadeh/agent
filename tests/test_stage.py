@@ -1,13 +1,13 @@
-"""Tests for the pipeline Stage/Pipeline system (domain/stage.py) and
-its concrete stages (domain/stages.py) — composability, reordering via
+"""Tests for the pipeline Stage/Pipeline system (agent/stage.py) and
+its concrete stages (agent/stages.py) — composability, reordering via
 configuration, cancellation, and error propagation.
 """
 
 import unittest
 
-from domain import PipelineConfig, ProjectPipeline
-from domain.context import ProjectContext
-from domain.stage import Pipeline, PipelineCancelled, PipelineContext, Stage, Turn
+from agent import PipelineConfig, ProjectPipeline
+from agent.stage import Pipeline, PipelineCancelled, PipelineContext, Stage, Turn
+from models.context import ProjectContext
 
 
 class RecordingStage(Stage):
@@ -119,7 +119,7 @@ class RecordingObserver:
 
 class TestPipelineLifecycleEvents(unittest.IsolatedAsyncioTestCase):
     async def test_events_fire_around_each_stage(self):
-        from domain.events import StageEventBus
+        from agent.events import StageEventBus
 
         bus = StageEventBus()
         observer = RecordingObserver()
@@ -139,7 +139,7 @@ class TestPipelineLifecycleEvents(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failure_event_fires_instead_of_completed(self):
-        from domain.events import StageEventBus
+        from agent.events import StageEventBus
 
         bus = StageEventBus()
         observer = RecordingObserver()

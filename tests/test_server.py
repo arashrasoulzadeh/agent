@@ -1,4 +1,4 @@
-"""Tests for the server/ package: a real websockets server and a real
+"""Tests for the wire/ package: a real websockets server and a real
 websockets client, talking the actual wire protocol (see docs/PROTOCOL.md)
 end to end. The pipeline is always a stub (tests/stubs.py) — this suite
 never touches the network or spends a real API token.
@@ -11,7 +11,7 @@ import uuid
 
 import websockets
 
-from application import rooms
+from service import rooms
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,

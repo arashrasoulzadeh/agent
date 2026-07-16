@@ -12,8 +12,8 @@ from pathlib import Path
 
 import websockets
 
-from application import rooms
-from interfaces.ws import app as server_app
+from service import rooms
+from wire import app as server_app
 
 
 class StubAnalyst:
@@ -32,8 +32,8 @@ class StubPipeline:
     """Returns canned, instant text for any question.
 
     Constructed from just a sink (see `_wrap_as_factory` below) — never
-    touches `infrastructure.llm.get_llm()` or any other network/API-key
-    dependent wiring, unlike `application.rooms.default_pipeline_factory`.
+    touches `llm.get_llm()` or any other network/API-key dependent
+    wiring, unlike `service.rooms.default_pipeline_factory`.
     """
 
     def __init__(self, sink):
@@ -67,7 +67,7 @@ class ToolCallingPipeline(StubPipeline):
 
 class AskToolPipeline(StubPipeline):
     """Like StubPipeline, but the question 'ask-me' drives the `ask` tool
-    via core.ask_context — exercising the same path modules/ask.py uses."""
+    via core.ask_context — exercising the same path tool/ask.py uses."""
 
     def ask(self, question: str) -> str:
         self.questions.append(question)

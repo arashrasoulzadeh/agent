@@ -1,6 +1,5 @@
-"""Tests for interfaces/ws/lifecycle.py: init/start/stop hook
-orchestration — one module's failing hook must not stop another module's
-from running.
+"""Tests for wire/lifecycle.py: init/start/stop hook orchestration — one
+module's failing hook must not stop another module's from running.
 
 The real subprocess-level behavior (a running server actually calling
 these on startup and on SIGINT/SIGTERM) was also verified manually by
@@ -10,7 +9,7 @@ repeated here as an automated test since it needs a real OS process.
 
 import unittest
 
-from interfaces.ws import lifecycle
+from wire import lifecycle
 
 
 class RecordingModule:
@@ -86,7 +85,7 @@ class TestLifecycleOrchestration(unittest.TestCase):
         self.assertIn("stop", fine.calls)
 
     def test_stop_runs_even_for_a_module_that_never_had_init_or_start_called(self):
-        # Mirrors server/app.py's finally block: stop() must tolerate a
+        # Mirrors wire/app.py's finally block: stop() must tolerate a
         # module whose init()/start() never ran (e.g. a sibling module's
         # init() raised before this one's start() was reached).
         module = RecordingModule("never-started")

@@ -15,7 +15,7 @@ dependencies = [
 
 [project.scripts]
 agent = "cli:main"
-agent-server = "interfaces.ws.__main__:main"
+agent-server = "wire.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -27,11 +27,15 @@ py-modules = ["cli", "main"]
 [tool.setuptools.packages.find]
 include = [
     "core*",
-    "modules*",
-    "domain*",
-    "application*",
-    "infrastructure*",
-    "interfaces*",
+    "llm*",
+    "tool*",
+    "agent*",
+    "models*",
+    "wire*",
+    "service*",
+    "ui*",
+    "hooks*",
+    "extra*",
 ]
 
 [tool.ruff]

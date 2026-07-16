@@ -1,12 +1,12 @@
 """Routes the `ask` tool's question to whichever room is running it.
 
-`modules/ask.py` is a plain `@tool` function: the LLM decides its
+`tool/ask.py` is a plain `@tool` function: the LLM decides its
 arguments, so there's no way to hand it "which room is calling me" as a
-parameter. A contextvar solves that without `modules` depending on
-`server` (which itself depends on `pipeline`, which depends on `modules` —
+parameter. A contextvar solves that without `tool` depending on
+`service` (which itself depends on `agent`, which depends on `tool` —
 a cycle if the dependency ran the other way).
 
-`application/rooms.py` sets the asker from *inside* the worker thread that runs
+`service/rooms.py` sets the asker from *inside* the worker thread that runs
 one room's turn (see its use of `asyncio.to_thread`, which copies the
 calling context into the new thread): setting it there, rather than
 before dispatching to the thread, keeps each concurrently running room's

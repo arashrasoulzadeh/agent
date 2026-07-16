@@ -1,14 +1,14 @@
 """The module lifecycle contract.
 
-A module under modules/ needs nothing from this file to add a
-capability — a `@tool`-decorated function is enough (see
-modules/__init__.py, core/registry.py). This only matters for a module
-that has state to set up or tear down: a connection pool, a background
-task, a cache warmed from disk, anything that shouldn't happen at import
-time and needs to be released cleanly on shutdown.
+A module under tool/ needs nothing from this file to add a capability —
+a `@tool`-decorated function is enough (see tool/__init__.py,
+tool/registry.py). This only matters for a module that has state to set
+up or tear down: a connection pool, a background task, a cache warmed
+from disk, anything that shouldn't happen at import time and needs to be
+released cleanly on shutdown.
 
 To opt in, expose a module-level `MODULE` object implementing whichever
-of these three methods you need — `core/registry.py` checks with
+of these three methods you need — `tool/registry.py` checks with
 `hasattr`, not `isinstance`, so a module implementing only `stop()` (say,
 to flush something on shutdown) is exactly as valid as one implementing
 all three. See docs/MODULES.md for a full worked example.

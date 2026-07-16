@@ -1,6 +1,6 @@
-"""Tests for core/registry.py's module discovery: tools, AGENT_TOOL
+"""Tests for tool/registry.py's discovery: tools, AGENT_TOOL
 opt-out, and the Lifecycle contract (core/module.py) — against a
-temporary modules/ directory, so this never touches the real modules/.
+temporary tool/ directory, so this never touches the real tool/.
 """
 
 import shutil
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core import registry
+from tool import registry
 
 
 class TestModuleDiscovery(unittest.TestCase):
@@ -20,16 +20,16 @@ class TestModuleDiscovery(unittest.TestCase):
         package_dir.mkdir()
         (package_dir / "__init__.py").write_text("")
 
-        self._original_dir = registry.MODULES_DIR
-        self._original_package = registry.MODULES_PACKAGE
-        registry.MODULES_DIR = package_dir
-        registry.MODULES_PACKAGE = self.package_name
+        self._original_dir = registry.TOOLS_DIR
+        self._original_package = registry.TOOL_PACKAGE
+        registry.TOOLS_DIR = package_dir
+        registry.TOOL_PACKAGE = self.package_name
         sys.path.insert(0, str(self.tmp_dir))
         self.package_dir = package_dir
 
     def tearDown(self):
-        registry.MODULES_DIR = self._original_dir
-        registry.MODULES_PACKAGE = self._original_package
+        registry.TOOLS_DIR = self._original_dir
+        registry.TOOL_PACKAGE = self._original_package
         sys.path.remove(str(self.tmp_dir))
         for name in list(sys.modules):
             if name == self.package_name or name.startswith(f"{self.package_name}."):

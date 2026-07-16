@@ -9,7 +9,6 @@ end. Nothing here touches the network or spends a real API token.
 import asyncio
 import unittest
 
-from interfaces.cli.app import AgentApp
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
@@ -18,6 +17,7 @@ from tests.stubs import (
     ToolCallingPipeline,
     running_server,
 )
+from ui.app import AgentApp
 
 
 async def wait_until(predicate, timeout: float = 5.0, interval: float = 0.02) -> None:

@@ -38,8 +38,8 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Import check
-        run: python -c "import main, cli, pipeline, tools, helpers"
+        run: python -c "import main, cli, core, llm, tool, agent, models, wire, service, ui, hooks"
       - name: Run tests
-        # `python -m` puts the repo root on sys.path so `import tools` resolves.
+        # `python -m` puts the repo root on sys.path so these imports resolve.
         # The suite covers the offline guards; nothing here calls the API.
         run: python -m pytest tests/ -v
