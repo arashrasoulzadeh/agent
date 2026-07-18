@@ -1,0 +1,339 @@
+"""Tests for service/ui_builder.py: pure Room-state -> Node functions.
+
+No server, no room, no client — every function here takes plain values
+and returns a Node, so these are ordinary unit tests asserting on the
+returned shape.
+"""
+
+import unittest
+
+from service import ui_builder
+
+
+def _ids(node):
+    return [c.id for c in node.children]
+
+
+def _find(node, node_id):
+    """Recursively finds a node by id anywhere in the tree — settings
+    rows nest their label/input a level deeper than the modal itself."""
+    if node.id == node_id:
+        return node
+    for child in node.children:
+        found = _find(child, node_id)
+        if found is not None:
+            return found
+    return None
+
+
+class TestHeaderNode(unittest.TestCase):
+    def test_basic_shape_has_no_status_row_when_idle(self):
+        node = ui_builder.header_node(
+            model="gpt-4o-mini",
+            base_url="https://api.gapgpt.app/v1",
+            tool_names=["cat", "ls"],
+            active_tool=None,
+            tokens={"prompt": 0, "completion": 0, "total": 0},
+            status_label=None,
+        )
+        self.assertEqual(node.type, "container")
+        self.assertEqual(node.id, "header")
+        ids = _ids(node)
+        self.assertNotIn("header-status", ids)
+        self.assertIn("connection-status", ids)
+
+    def test_status_row_present_while_a_turn_is_running(self):
+        node = ui_builder.header_node(
+            model="gpt-4o-mini",
+            base_url="https://api.gapgpt.app/v1",
+            tool_names=[],
+            active_tool=None,
+            tokens={"prompt": 0, "completion": 0, "total": 0},
+            status_label="thinking",
+        )
+        status = next(c for c in node.children if c.id == "header-status")
+        self.assertIn("thinking", status.props["text"])
+
+    def test_connection_status_slot_is_always_empty(self):
+        node = ui_builder.header_node(
+            model="m",
+            base_url="u",
+            tool_names=[],
+            active_tool=None,
+            tokens={"total": 0},
+            status_label=None,
+        )
+        slot = next(c for c in node.children if c.id == "connection-status")
+        self.assertEqual(slot.props, {})
+        self.assertEqual(slot.children, [])
+
+    def test_active_tool_gets_highlighted_span(self):
+        node = ui_builder.header_node(
+            model="m",
+            base_url="u",
+            tool_names=["cat", "ls"],
+            active_tool="cat",
+            tokens={"total": 0},
+            status_label=None,
+        )
+        tools = next(c for c in node.children if c.id == "header-tools")
+        spans = tools.props["spans"]
+        # spans[0] is the "  tools  " label prefix — skip it. "ls" is a
+        # substring of "tools" itself, so a bare `"ls" in text` match
+        # would wrongly hit that prefix span instead of the ls tool's
+        # own span; matching on the padded, marker-prefixed form avoids
+        # that.
+        cat_span = next(s for s in spans if s["text"].strip("▶ ") == "cat")
+        ls_span = next(s for s in spans if s["text"].strip("▶ ") == "ls")
+        self.assertIn("▶", cat_span["text"])
+        self.assertEqual(cat_span["style"], "bold bright_green")
+        self.assertNotIn("▶", ls_span["text"])
+        self.assertEqual(ls_span["style"], "grey50")
+
+    def test_token_total_is_comma_formatted(self):
+        node = ui_builder.header_node(
+            model="m",
+            base_url="u",
+            tool_names=[],
+            active_tool=None,
+            tokens={"total": 12345},
+            status_label=None,
+        )
+        tokens_node = next(c for c in node.children if c.id == "header-tokens")
+        self.assertIn("12,345", tokens_node.props["text"])
+
+
+class TestFooterNodes(unittest.TestCase):
+    def test_single_project_info_text(self):
+        node = ui_builder.footer_info_node(
+            "/some/project", [{"name": "project", "primary": True}], "room-1"
+        )
+        self.assertEqual(node.props["text"], "project /some/project   room room-1")
+
+    def test_multi_project_info_text_lists_sorted_names(self):
+        projects = [
+            {"name": "backend", "primary": False},
+            {"name": "project", "primary": True},
+        ]
+        node = ui_builder.footer_info_node("/p", projects, "room-1")
+        self.assertEqual(node.props["text"], "projects backend, project   room room-1")
+
+    def test_default_placeholder(self):
+        node = ui_builder.footer_input_node(awaiting_reply=False, awaiting_resync=False)
+        self.assertEqual(node.type, "input")
+        self.assertEqual(node.id, "footer-input")
+        self.assertIn("follow-up", node.props["placeholder"])
+        self.assertFalse(node.props["password"])
+
+    def test_awaiting_reply_placeholder(self):
+        node = ui_builder.footer_input_node(awaiting_reply=True, awaiting_resync=False)
+        self.assertEqual(node.props["placeholder"], "Your answer…")
+
+    def test_awaiting_resync_placeholder(self):
+        node = ui_builder.footer_input_node(awaiting_reply=False, awaiting_resync=True)
+        self.assertEqual(node.props["placeholder"], "y/n")
+
+    def test_awaiting_reply_takes_priority_over_resync(self):
+        # Mirrors Room's own invariant: these two flags are never both
+        # meaningfully true at once, but reply wins if they were.
+        node = ui_builder.footer_input_node(awaiting_reply=True, awaiting_resync=True)
+        self.assertEqual(node.props["placeholder"], "Your answer…")
+
+
+class TestCommandListNode(unittest.TestCase):
+    def test_contains_all_four_commands_hidden_by_default(self):
+        node = ui_builder.command_list_node()
+        self.assertEqual(node.type, "list")
+        self.assertFalse(node.props["display"])
+        values = [c.props["value"] for c in node.children]
+        self.assertEqual(values, ["/add", "/remove", "/projects", "/settings"])
+
+
+class TestQuestionModalNode(unittest.TestCase):
+    def test_none_without_options(self):
+        self.assertIsNone(ui_builder.question_modal_node("open ended?", None))
+        self.assertIsNone(ui_builder.question_modal_node("open ended?", []))
+
+    def test_one_button_per_option_in_order(self):
+        node = ui_builder.question_modal_node("pick one", ["a", "b", "c"])
+        options_row = next(c for c in node.children if c.id == "modal-options")
+        self.assertEqual(
+            [c.id for c in options_row.children], ["opt-0", "opt-1", "opt-2"]
+        )
+        self.assertEqual(
+            [c.props["label"] for c in options_row.children], ["a", "b", "c"]
+        )
+
+    def test_question_text_included(self):
+        node = ui_builder.question_modal_node("pick one", ["a"])
+        question = next(c for c in node.children if c.id == "modal-question")
+        self.assertEqual(question.props["text"], "pick one")
+
+
+class TestSettingsModalNode(unittest.TestCase):
+    def _settings(self):
+        return [
+            {
+                "key": "GAPGPT_MODEL",
+                "label": "Model",
+                "secret": False,
+                "scope": "new-rooms",
+                "value": "gpt-5",
+                "set": True,
+            },
+            {
+                "key": "NOTION_API_KEY",
+                "label": "Notion API key",
+                "secret": True,
+                "scope": "immediate",
+                "value": "••••••••",
+                "set": True,
+            },
+        ]
+
+    def test_non_secret_input_prefilled_with_real_value(self):
+        node = ui_builder.settings_modal_node(self._settings())
+        model_input = _find(node, "setting-GAPGPT_MODEL")
+        self.assertEqual(model_input.props["value"], "gpt-5")
+        self.assertFalse(model_input.props["password"])
+
+    def test_secret_input_starts_blank_never_the_masked_value(self):
+        node = ui_builder.settings_modal_node(self._settings())
+        key_input = _find(node, "setting-NOTION_API_KEY")
+        self.assertEqual(key_input.props["value"], "")
+        self.assertTrue(key_input.props["password"])
+
+    def test_new_rooms_scope_label_gets_suffix(self):
+        node = ui_builder.settings_modal_node(self._settings())
+        label = _find(node, "setting-GAPGPT_MODEL-label")
+        self.assertIn("(new rooms)", label.props["text"])
+
+    def test_immediate_scope_label_has_no_suffix(self):
+        node = ui_builder.settings_modal_node(self._settings())
+        label = _find(node, "setting-NOTION_API_KEY-label")
+        self.assertNotIn("(new rooms)", label.props["text"])
+
+    def test_rows_are_nested_containers_with_label_and_input(self):
+        node = ui_builder.settings_modal_node(self._settings())
+        row = next(c for c in node.children if c.id == "setting-GAPGPT_MODEL-row")
+        self.assertEqual(row.type, "container")
+        child_ids = {c.id for c in row.children}
+        self.assertEqual(
+            child_ids, {"setting-GAPGPT_MODEL-label", "setting-GAPGPT_MODEL"}
+        )
+
+
+class TestContentEntryNode(unittest.TestCase):
+    def test_message(self):
+        node = ui_builder.content_entry_node("message", "n1", text="hello", role="user")
+        self.assertEqual(node.props["text"], "> hello")
+
+    def test_tool_call_has_three_styled_spans(self):
+        node = ui_builder.content_entry_node(
+            "tool_call", "n1", name="cat", args="path='README.md'"
+        )
+        spans = node.props["spans"]
+        self.assertEqual(len(spans), 3)
+        self.assertEqual(spans[1]["text"], "cat")
+
+    def test_tool_call_args_are_truncated(self):
+        long_args = "x" * 500
+        node = ui_builder.content_entry_node(
+            "tool_call", "n1", name="cat", args=long_args
+        )
+        args_span = node.props["spans"][2]["text"]
+        self.assertLess(len(args_span), 200)
+
+    def test_tool_result(self):
+        node = ui_builder.content_entry_node("tool_result", "n1", output="# hi")
+        self.assertIn("# hi", node.props["text"])
+        self.assertTrue(node.props["text"].startswith("← "))
+
+    def test_question(self):
+        node = ui_builder.content_entry_node("question", "n1", text="pick one")
+        self.assertEqual(node.props["text"], "? pick one")
+
+    def test_answer_is_a_markdown_panel(self):
+        node = ui_builder.content_entry_node("answer", "n1", text="**bold**")
+        self.assertTrue(node.props["panel"])
+        self.assertEqual(node.props["format"], "markdown")
+        self.assertEqual(node.props["text"], "**bold**")
+
+    def test_error_is_a_titled_panel(self):
+        node = ui_builder.content_entry_node("error", "n1", message="bad project path")
+        self.assertTrue(node.props["panel"])
+        self.assertEqual(node.props["panel_title"], "error")
+        self.assertEqual(node.props["border_style"], "red")
+
+    def test_resync_suggested_mentions_counts(self):
+        node = ui_builder.content_entry_node(
+            "resync_suggested", "n1", changed=3, total=10, fraction=0.3
+        )
+        self.assertIn("3 of 10", node.props["text"])
+
+    def test_info(self):
+        node = ui_builder.content_entry_node("info", "n1", text="Saved Model.")
+        self.assertEqual(node.props["text"], "Saved Model.")
+
+    def test_unknown_kind_raises(self):
+        with self.assertRaises(ValueError):
+            ui_builder.content_entry_node("nonsense", "n1")
+
+    def test_every_entry_carries_the_given_node_id(self):
+        for kind, fields in [
+            ("message", {"text": "x", "role": "user"}),
+            ("tool_call", {"name": "cat", "args": ""}),
+            ("tool_result", {"output": "x"}),
+            ("question", {"text": "x"}),
+            ("answer", {"text": "x"}),
+            ("error", {"message": "x"}),
+            ("resync_suggested", {"changed": 1, "total": 2}),
+            ("info", {"text": "x"}),
+        ]:
+            node = ui_builder.content_entry_node(kind, "fixed-id", **fields)
+            self.assertEqual(node.id, "fixed-id", msg=kind)
+
+
+class TestRootTree(unittest.TestCase):
+    def _kwargs(self, **overrides):
+        base = dict(
+            path="/p",
+            projects=[{"name": "project", "primary": True}],
+            room_id="room-1",
+            model="gpt-4o-mini",
+            base_url="https://api.gapgpt.app/v1",
+            tool_names=["cat"],
+            active_tool=None,
+            tokens={"total": 0},
+            status_label=None,
+            awaiting_reply=False,
+            awaiting_resync=False,
+        )
+        base.update(overrides)
+        return base
+
+    def test_top_level_shape(self):
+        tree = ui_builder.root_tree(**self._kwargs())
+        self.assertEqual(tree.id, "root")
+        self.assertEqual(_ids(tree), ["header", "content", "footer"])
+
+    def test_content_defaults_to_empty_list(self):
+        tree = ui_builder.root_tree(**self._kwargs())
+        content = next(c for c in tree.children if c.id == "content")
+        self.assertEqual(content.props["kind"], "log")
+        self.assertEqual(content.children, [])
+
+    def test_transcript_nodes_are_embedded_in_content(self):
+        entry = ui_builder.content_entry_node("message", "n1", text="hi", role="user")
+        tree = ui_builder.root_tree(**self._kwargs(transcript_nodes=[entry]))
+        content = next(c for c in tree.children if c.id == "content")
+        self.assertEqual(content.children, [entry])
+
+    def test_footer_contains_info_commands_and_input(self):
+        tree = ui_builder.root_tree(**self._kwargs())
+        footer = next(c for c in tree.children if c.id == "footer")
+        self.assertEqual(_ids(footer), ["footer-info", "command-popup", "footer-input"])
+
+
+if __name__ == "__main__":
+    unittest.main()
