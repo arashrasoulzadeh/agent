@@ -115,6 +115,25 @@ Type follow-up questions into the input at the bottom. `exit`, `quit`, or `q`
 ends the session. Scroll the transcript with arrow keys, PageUp/PageDown, or
 the mouse wheel — it never scrolls your terminal itself.
 
+### Updating / uninstalling
+
+There's no packaged release yet — this is a git checkout with an editable
+install (`pip install -e .`), so "update" means pulling the latest commit and
+reinstalling, and "uninstall" means unregistering the console scripts:
+
+```bash
+agent update              # git pull --ff-only, then pip install -e . again
+agent update --dry-run    # just report how many commits behind you are
+agent uninstall           # pip uninstall — keeps rooms/ and the session cache
+agent uninstall --purge   # also deletes rooms/ and the workspace session cache
+agent uninstall --yes     # skip the confirmation prompt
+```
+
+`agent update` refuses to run against a dirty working tree, and pulls with
+`--ff-only` — it will never merge or overwrite local changes, just fail
+loudly if history has diverged. `agent uninstall` never touches your saved
+conversations or cached project indexes unless you pass `--purge`.
+
 ## Architecture
 
 The project is organized by technical concern, one top-level package per

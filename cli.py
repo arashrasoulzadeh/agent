@@ -8,6 +8,14 @@ any client.
 
 Once connected, it hands off to the full-screen TUI (ui/app.py), which
 creates or resumes a room and renders whatever the server reports.
+
+`agent update` / `agent uninstall` are a different mode entirely — self-
+management, not a project session — dispatched to self_update.py before
+any of the argument parsing below runs. Reserving those two words means
+a project literally named "update" or "uninstall" can't be opened as
+`agent update`/`agent uninstall` (it still works via `agent ./update`
+or `agent --room <id>`); an acceptable trade for not needing a
+subcommand framework here.
 """
 
 import argparse
@@ -20,6 +28,16 @@ from wire.config import HOST, PORT
 
 
 def main(argv: list[str] | None = None) -> None:
+    raw = list(sys.argv[1:]) if argv is None else list(argv)
+    if raw[:1] == ["update"]:
+        import self_update
+
+        sys.exit(self_update.run_update(raw[1:]))
+    if raw[:1] == ["uninstall"]:
+        import self_update
+
+        sys.exit(self_update.run_uninstall(raw[1:]))
+
     parser = argparse.ArgumentParser(
         prog="agent",
         description="Ask questions about a codebase.",
@@ -27,7 +45,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "path",
         nargs="?",
-        help="Project to analyze. Prompts for one if omitted. Ignored with --room.",
+        help=(
+            "Project to analyze. Prompts for one if omitted. Ignored with "
+            "--room. ('update'/'uninstall' are reserved; see `agent update "
+            "--help`.)"
+        ),
     )
     parser.add_argument(
         "--room",
