@@ -24,9 +24,11 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, RichLog, Static
+from textual.widgets import Button, Input, Label, OptionList, RichLog, Static
+from textual.widgets.option_list import Option
 
 from ui import answer, error, style, trace
 
@@ -43,11 +45,22 @@ def _resync_prompt_text(data: dict[str, Any]) -> str:
     )
 
 
-_COMMANDS = {"/add", "/remove", "/projects"}
+_COMMANDS = {"/add", "/remove", "/projects", "/settings"}
+
+# (command, usage, description) — drives the command popup (see
+# AgentApp._update_command_popup) and stays in sync with _COMMANDS above
+# manually; there's no dynamic discovery here since the command set is
+# small and fixed.
+_COMMAND_HELP = [
+    ("/add", "/add <path> [name]", "Attach another project to this room"),
+    ("/remove", "/remove <name>", "Detach a project"),
+    ("/projects", "/projects", "List attached projects"),
+    ("/settings", "/settings", "Open the settings screen"),
+]
 
 
 def _parse_command(value: str) -> tuple[str, list[str]] | None:
-    """Recognizes only `/add`, `/remove`, `/projects` — anything else
+    """Recognizes only `/add`, `/remove`, `/projects`, `/settings` — anything else
     (ordinary chat text, a bare "y"/"n" resync reply, an unrelated
     slash-prefixed typo) returns None and falls through to normal
     handling."""
@@ -115,6 +128,102 @@ class QuestionModal(ModalScreen[str | None]):
         self.dismiss(str(event.button.label))
 
 
+class SettingsModal(ModalScreen[None]):
+    """One Label+Input row per setting from a `/settings/list` response;
+    each Input saves independently on Enter, Escape closes the whole
+    screen.
+
+    A secret setting's Input starts blank (never pre-filled with the
+    masked dots `/settings/list` sends back — submitting those literally
+    would overwrite the real value with garbage), typed in
+    `password=True` mode, and an empty submit is a no-op: the field was
+    never touched, so nothing is sent. A non-secret setting's Input
+    starts pre-filled with its real current value; any submit (even
+    unchanged) is a harmless write.
+
+    `Input.Submitted` bubbles up through this screen to the App the same
+    way it would for the footer's own input — `on_input_submitted` here
+    must call `event.stop()` or AgentApp's own handler would also fire
+    for the same keystroke, misreading a saved setting's value as a
+    chat message or command.
+    """
+
+    BINDINGS = [("escape", "dismiss(None)", "Close")]
+
+    DEFAULT_CSS = """
+    SettingsModal {
+        align: center middle;
+    }
+    SettingsModal #settings-box {
+        width: 74;
+        max-width: 92%;
+        border: heavy $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+    SettingsModal #settings-title {
+        margin-bottom: 1;
+    }
+    SettingsModal .settings-row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    SettingsModal .settings-label {
+        width: 30;
+        color: $text-muted;
+    }
+    SettingsModal .settings-row Input {
+        width: 1fr;
+    }
+    SettingsModal #settings-hint {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, app_ref: "AgentApp", settings: list[dict[str, Any]]):
+        super().__init__()
+        self._app_ref = app_ref
+        self.settings = settings
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-box"):
+            yield Label("Settings", id="settings-title")
+            for s in self.settings:
+                label = s["label"]
+                if s["scope"] == "new-rooms":
+                    label += " (new rooms)"
+                with Horizontal(classes="settings-row"):
+                    yield Label(label, classes="settings-label")
+                    yield Input(
+                        value="" if s["secret"] else s["value"],
+                        placeholder=(
+                            "unchanged — type to replace" if s["secret"] else ""
+                        ),
+                        password=s["secret"],
+                        id=f"setting-{s['key']}",
+                    )
+            yield Label("Enter to save a field, Escape to close.", id="settings-hint")
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        key = (event.input.id or "").removeprefix("setting-")
+        spec = next((s for s in self.settings if s["key"] == key), None)
+        if spec is None:
+            return
+        value = event.value
+        if spec["secret"] and not value:
+            return  # untouched — never overwrite a secret with blank
+        result = await self._app_ref._safe_request_data(
+            "/settings/update", {"key": key, "value": value}
+        )
+        if result is None:
+            return
+        if spec["secret"]:
+            event.input.value = ""
+        self._app_ref.write(Text(f"Saved {spec['label']}.", style=style.INFO))
+
+
 class AgentApp(App):
     """Header (sized to its own content) / content (fills the rest) /
     footer (sized to its own content, incl. the input line).
@@ -125,6 +234,17 @@ class AgentApp(App):
     """
 
     TITLE = "agent"
+
+    # Up/Down/Escape only do anything while the command popup is showing
+    # (each action checks that itself) — Input doesn't bind any of these
+    # three, so they always bubble here uninterrupted regardless of
+    # whether the popup is visible, with no effect on existing behavior
+    # when it isn't.
+    BINDINGS = [
+        Binding("up", "popup_prev", show=False),
+        Binding("down", "popup_next", show=False),
+        Binding("escape", "popup_dismiss", show=False),
+    ]
 
     CSS = """
     Screen {
@@ -150,6 +270,13 @@ class AgentApp(App):
         height: 1;
         color: $text-muted;
         padding: 0 1;
+    }
+
+    #command-popup {
+        height: auto;
+        max-height: 6;
+        display: none;
+        border-top: solid $primary;
     }
 
     #footer-input {
@@ -187,6 +314,7 @@ class AgentApp(App):
         yield RichLog(id="content", wrap=True, markup=False, highlight=False)
         with Vertical(id="footer"):
             yield Static(id="footer-info")
+            yield OptionList(id="command-popup")
             yield Input(placeholder="Connecting…", id="footer-input")
 
     def on_mount(self) -> None:
@@ -405,8 +533,93 @@ class AgentApp(App):
 
     # ---- input handling -------------------------------------------------
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "footer-input":
+            return
+        self._update_command_popup(event.value)
+
+    def _update_command_popup(self, value: str) -> None:
+        """Shows every command whose name starts with the input's first
+        token while that token is still ambiguous or incomplete; hides
+        once it's an exact, unambiguous match and the user has moved on
+        to typing arguments (a space after it), or once awaiting_reply/
+        awaiting_resync means "/"-prefixed text isn't treated as a
+        command at all (see on_input_submitted's early returns)."""
+        popup = self.query_one("#command-popup", OptionList)
+        first_token = value.split(" ", 1)[0]
+        matches = [c for c in _COMMAND_HELP if c[0].startswith(first_token)]
+        exact_and_past_it = (
+            len(matches) == 1 and matches[0][0] == first_token and " " in value
+        )
+        if (
+            self.awaiting_reply
+            or self.awaiting_resync
+            or not value.startswith("/")
+            or not matches
+            or exact_and_past_it
+        ):
+            popup.display = False
+            return
+
+        popup.display = True
+        popup.clear_options()
+        for command, usage, description in matches:
+            popup.add_option(Option(f"{usage}  —  {description}", id=command))
+        popup.highlighted = 0
+
+    def _accept_command_popup(self, input_widget: Input, value: str) -> bool:
+        """If the popup is showing a suggestion and `value` isn't
+        already a complete, recognized command, Enter completes the
+        input to the highlighted suggestion instead of submitting —
+        returns True in that case. Returns False for every other case
+        (already-valid command, popup not showing, no matches), leaving
+        on_input_submitted's normal handling completely untouched —
+        including the existing "unrecognized slash text falls through
+        to being sent as chat" behavior when there's no match at all.
+        """
+        if self.awaiting_reply or self.awaiting_resync:
+            return False
+        if _parse_command(value) is not None:
+            return False
+        popup = self.query_one("#command-popup", OptionList)
+        if not popup.display or popup.option_count == 0:
+            return False
+        index = popup.highlighted or 0
+        option = popup.get_option_at_index(index)
+        input_widget.value = f"{option.id} "
+        input_widget.cursor_position = len(input_widget.value)
+        return True
+
+    def action_popup_prev(self) -> None:
+        popup = self.query_one("#command-popup", OptionList)
+        if not popup.display or popup.option_count == 0:
+            return
+        popup.highlighted = ((popup.highlighted or 0) - 1) % popup.option_count
+
+    def action_popup_next(self) -> None:
+        popup = self.query_one("#command-popup", OptionList)
+        if not popup.display or popup.option_count == 0:
+            return
+        popup.highlighted = ((popup.highlighted or 0) + 1) % popup.option_count
+
+    def action_popup_dismiss(self) -> None:
+        popup = self.query_one("#command-popup", OptionList)
+        popup.display = False
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "command-popup":
+            return
+        input_widget = self.query_one("#footer-input", Input)
+        input_widget.value = f"{event.option.id} "
+        input_widget.cursor_position = len(input_widget.value)
+        input_widget.focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
+
+        if self._accept_command_popup(event.input, value):
+            return
+
         event.input.value = ""
 
         if self.awaiting_reply:
@@ -453,6 +666,11 @@ class AgentApp(App):
                 return
             await self._safe_request("/project/remove", {"name": args[0]})
             return
+        if command == "/settings":
+            data = await self._safe_request_data("/settings/list", {})
+            if data is not None:
+                self.push_screen(SettingsModal(self, data["settings"]))
+            return
 
     def _show_projects(self) -> None:
         if not self.projects:
@@ -482,3 +700,14 @@ class AgentApp(App):
             await self._request(route, data)
         except ServerError as exc:
             error.show(self, str(exc))
+
+    async def _safe_request_data(self, route: str, data: dict) -> dict | None:
+        """Like _safe_request, but returns the response payload on
+        success instead of discarding it — for callers (the /settings
+        command, SettingsModal's per-field saves) that need to read the
+        result rather than just fire-and-report-errors."""
+        try:
+            return await self._request(route, data)
+        except ServerError as exc:
+            error.show(self, str(exc))
+            return None

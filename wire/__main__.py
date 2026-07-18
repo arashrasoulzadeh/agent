@@ -17,11 +17,13 @@ import asyncio
 
 from dotenv import load_dotenv
 
+from core import settings
 from wire.app import serve
 
 
 def main() -> None:
     load_dotenv()
+    settings.apply_persisted()
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:

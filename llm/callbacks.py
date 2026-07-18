@@ -19,7 +19,13 @@ from langchain_core.outputs import LLMResult
 from core.text import preview
 
 logger = logging.getLogger("llm")
-_verbose = bool(os.environ.get("AGENT_VERBOSE"))
+
+
+def _verbose() -> bool:
+    # Read fresh on every call, not once at import time, so a live
+    # change to AGENT_VERBOSE (e.g. via the settings screen — see
+    # core/settings.py) takes effect immediately, no restart needed.
+    return bool(os.environ.get("AGENT_VERBOSE"))
 
 
 def _format_messages(messages: list[BaseMessage]) -> str:
@@ -65,5 +71,5 @@ class RawIOLogger(BaseCallbackHandler):
 
     def _log(self, message: str) -> None:
         logger.info(message)
-        if _verbose:
+        if _verbose():
             print(f"  {message}")

@@ -115,6 +115,30 @@ Type follow-up questions into the input at the bottom. `exit`, `quit`, or `q`
 ends the session. Scroll the transcript with arrow keys, PageUp/PageDown, or
 the mouse wheel — it never scrolls your terminal itself.
 
+### Settings
+
+Type `/settings` to open an in-TUI screen for everything in the env-var
+table above except `AGENT_WS_HOST`/`AGENT_WS_PORT` (those configure the
+connection this screen lives behind, so they aren't editable through it).
+One row per setting, `Enter` saves that row, `Escape` closes the screen:
+
+```
+/settings
+```
+
+Changes are read from and written to the server over the same WebSocket
+protocol as everything else (`/settings/list`, `/settings/update` — see
+`docs/PROTOCOL.md`) and persist to `settings.json` at the repo root
+(gitignored, like `.env`), so they survive a server restart without
+needing to hand-edit `.env`. `AGENT_VERBOSE` and `NOTION_API_KEY` take
+effect immediately; the GapGPT settings (model/base URL/timeout/API key)
+only affect rooms created *after* the change — an already-open
+conversation's LLM client was already built and isn't hot-swapped.
+Secret fields (`GAPGPT_API_KEY`, `NOTION_API_KEY`) are never shown in
+cleartext: the screen shows a blank field you can type a new value into
+(masked as you type), not the real stored value; leaving one blank and
+pressing Enter is a no-op, so you can never overwrite a key by accident.
+
 ### Updating / uninstalling
 
 There's no packaged release yet — this is a git checkout with an editable

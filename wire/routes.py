@@ -13,6 +13,7 @@ import asyncio
 import logging
 from typing import Any
 
+from core import settings
 from service import rooms
 from service.rooms import CannotRemovePrimaryProject
 from wire.protocol import ProtocolError
@@ -150,6 +151,24 @@ async def project_list(transport: Transport, data: dict) -> dict:
     return {"projects": room.project_list()}
 
 
+async def settings_list(transport: Transport, data: dict) -> dict:
+    return {"settings": settings.list_settings()}
+
+
+async def settings_update(transport: Transport, data: dict) -> dict:
+    key = data.get("key")
+    value = data.get("value")
+    if not key:
+        raise ProtocolError("/settings/update needs 'key'")
+    if value is None:
+        raise ProtocolError("/settings/update needs 'value'")
+    try:
+        settings.update_setting(key, value)
+    except ValueError as exc:
+        raise ProtocolError(str(exc)) from exc
+    return {"settings": settings.list_settings()}
+
+
 async def rooms_list(transport: Transport, data: dict) -> dict:
     return {"rooms": rooms.Room.list_saved()}
 
@@ -175,5 +194,7 @@ ROUTES: dict[str, Any] = {
     "/project/add": project_add,
     "/project/remove": project_remove,
     "/project/list": project_list,
+    "/settings/list": settings_list,
+    "/settings/update": settings_update,
     "/rooms/list": rooms_list,
 }

@@ -69,7 +69,8 @@ Three shapes travel over the connection, all JSON, newline-free.
 ```
 
 `room` is omitted for `/session/create` and `/rooms/list`, which don't
-need one yet.
+need one yet, and for `/settings/list`/`/settings/update`, which never
+need one at all — settings are process-global, not tied to any room.
 
 **Response** (server → client) — matched back to the request's `id`:
 
@@ -106,6 +107,8 @@ any request:
 | `/project/add` | `{"room": "<id>", "path": "...", "name": "..."?}` | `{"name": "<attached-name>", "projects": [{"name", "path", "primary"}, ...]}` | Attaches an additional project to this room. `name` defaults to the path's basename. Error if `name` already names a *different* path in this room, or a turn is already running. Immediately re-analyzes the room (like a confirmed `/resync`) so the cached overview covers every attached project — a `session.state` broadcast lands right away with the updated project list, followed by the usual turn events as the reanalysis runs. |
 | `/project/remove` | `{"room": "<id>", "name": "..."}` | `{"projects": [...]}` | Detaches a project and stops its background watcher. Error if `name` is the room's own primary project (its identity — never removable), `name` isn't attached, or a turn is already running. Also triggers an immediate reanalysis, same as `/project/add`. |
 | `/project/list` | `{"room": "<id>"}` | `{"projects": [{"name", "path", "primary"}, ...]}` | Every project currently attached to the room — no mutation, no turn. |
+| `/settings/list` | `{}` | `{"settings": [{"key", "label", "secret", "scope", "value", "set"}, ...]}` | Every known process-wide setting (`core/settings.py`'s `SETTINGS`) and its current effective value. No room needed — settings aren't per-room. `secret` settings' `value` is always masked (`"••••"`-style); the real value never round-trips over the wire. `scope` is `"immediate"` (takes effect on the very next use, e.g. `NOTION_API_KEY`) or `"new-rooms"` (only rooms created after the change pick it up, e.g. the GapGPT settings — the LLM client is built once per room and held for its whole life). |
+| `/settings/update` | `{"key": "...", "value": "..."}` | Same shape as `/settings/list`'s `data`, refreshed. | Persists `value` for `key` to `settings.json` (gitignored, like `.env`) and applies it to the running process immediately. Error if `key` isn't a known setting. |
 | `/rooms/list` | `{}` | `{"rooms": [{"id", "path", "updated_at"}, ...]}` | Every room saved to disk, newest first — for a resume picker. |
 
 ## Events
