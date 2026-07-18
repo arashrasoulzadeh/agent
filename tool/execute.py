@@ -11,24 +11,23 @@ import subprocess
 
 from langchain_core.tools import tool
 
-from core.guard import escapes_root, mentions_secret, project_root
+from core.guard import escapes_refusal, escapes_root, mentions_secret, project_root
 
 
 @tool
-def execute(command: str, timeout: int = 30) -> str:
+def execute(command: str, project: str | None = None, timeout: int = 30) -> str:
     """Run a shell command in the project folder and return its output.
 
     Args:
         command: The shell command to run. It must stay inside the project.
+        project: Name of an attached project to run the command in. Omit
+            to use the room's primary project.
         timeout: Seconds to wait before killing the command.
     """
     if mentions_secret(command):
         return "Error: that command touches a protected env file."
-    if escapes_root(command):
-        return (
-            f"Error: that command reaches outside the project folder "
-            f"({project_root()})."
-        )
+    if escapes_root(command, project=project):
+        return escapes_refusal(project)
 
     try:
         result = subprocess.run(
@@ -37,7 +36,7 @@ def execute(command: str, timeout: int = 30) -> str:
             text=True,
             capture_output=True,
             timeout=timeout,
-            cwd=project_root(),
+            cwd=project_root(project),
         )
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s."

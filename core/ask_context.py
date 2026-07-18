@@ -17,7 +17,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-AskFn = Callable[[str], "str | None"]
+AskFn = Callable[[str, "list[str] | None"], "str | None"]
 
 _current: ContextVar[AskFn | None] = ContextVar("current_asker", default=None)
 
@@ -32,7 +32,7 @@ def asker(fn: AskFn):
         _current.reset(token)
 
 
-def ask(question: str) -> str | None:
+def ask(question: str, options: "list[str] | None" = None) -> str | None:
     """Put `question` to whoever is listening, or None if no one is."""
     fn = _current.get()
-    return fn(question) if fn is not None else None
+    return fn(question, options) if fn is not None else None

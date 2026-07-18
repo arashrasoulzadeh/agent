@@ -40,8 +40,7 @@ def _cmd_attach(args: argparse.Namespace, manager: SessionManager) -> None:
         ignore_extra=args.ignore,
     )
     print(
-        f"attached {attachment.root!r} as {attachment.name!r} "
-        f"in session {args.name!r}"
+        f"attached {attachment.root!r} as {attachment.name!r} in session {args.name!r}"
     )
 
 
@@ -58,8 +57,7 @@ def _cmd_list_sessions(args: argparse.Namespace, manager: SessionManager) -> Non
 def _cmd_list_projects(args: argparse.Namespace, manager: SessionManager) -> None:
     for attachment in manager.list_projects(args.name):
         print(
-            f"{attachment.name}\t{attachment.root}\t"
-            f"attached {attachment.attached_at}"
+            f"{attachment.name}\t{attachment.root}\tattached {attachment.attached_at}"
         )
 
 

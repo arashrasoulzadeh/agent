@@ -91,7 +91,7 @@ def should_not_appear(x: str) -> str:
     def test_lifecycle_module_with_all_three_hooks_is_discovered(self):
         self._write(
             "with_lifecycle.py",
-            '''
+            """
 class _Mod:
     def init(self, config):
         pass
@@ -101,7 +101,7 @@ class _Mod:
         pass
 
 MODULE = _Mod()
-''',
+""",
         )
         result = registry.discover()
         self.assertEqual(len(result.lifecycle_modules), 1)
@@ -111,13 +111,13 @@ MODULE = _Mod()
         # need to implement init/start/stop, just whichever it needs.
         self._write(
             "stop_only.py",
-            '''
+            """
 class _Mod:
     def stop(self):
         pass
 
 MODULE = _Mod()
-''',
+""",
         )
         result = registry.discover()
         self.assertEqual(len(result.lifecycle_modules), 1)

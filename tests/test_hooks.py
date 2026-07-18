@@ -146,13 +146,13 @@ class TestExtraDiscovery(unittest.TestCase):
     def test_discover_imports_a_hook_file_and_registers_its_hook(self):
         self._write(
             "my_hook.py",
-            '''
+            """
 from hooks import hook
 
 @hook("before_prompt")
 def shout(text):
     return text.upper()
-''',
+""",
         )
         loader.discover()
         self.assertEqual(dispatch.filter("before_prompt", "hi"), "HI")
@@ -160,13 +160,13 @@ def shout(text):
     def test_underscore_prefixed_files_are_skipped(self):
         self._write(
             "_ignored.py",
-            '''
+            """
 from hooks import hook
 
 @hook("before_prompt")
 def should_not_register(text):
     return "SHOULD NOT APPEAR"
-''',
+""",
         )
         loader.discover()
         self.assertEqual(dispatch.filter("before_prompt", "hi"), "hi")

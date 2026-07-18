@@ -14,15 +14,17 @@ from core.guard import is_secret, outside_refusal, resolve_in_root
 
 
 @tool
-def tree(path: str = ".") -> str:
+def tree(path: str = ".", project: str | None = None) -> str:
     """Return a textual tree of the directory at the given path.
 
     Args:
         path: Directory to tree-list, inside the project. Defaults to root.
+        project: Name of an attached project to tree-list. Omit to use
+            the room's primary project.
     """
-    root = resolve_in_root(path)
+    root = resolve_in_root(path, project=project)
     if root is None:
-        return outside_refusal(path)
+        return outside_refusal(path, project=project)
     if not root.exists():
         return f"Error: {path!r} does not exist."
     if not root.is_dir():

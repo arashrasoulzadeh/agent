@@ -165,42 +165,57 @@ content that's since changed.
 
 ## Room bootstrap integration
 
-Every room (`service/rooms.py`) has exactly one project, attached into
-this store under a session named after the room's own id — already an
-md5 of the resolved project path (`room_id_for_path()`) — with the
-project itself always named `"project"` (`WORKSPACE_PROJECT_NAME`), so
-the two ids line up without a second lookup table:
+A room (`service/rooms.py`) has one *primary* project — always named
+`"project"` (`WORKSPACE_PROJECT_NAME`) — plus any number of additional
+ones attached later via `/project/add` (or the TUI's `/add` command).
+Every attached project lives in the same session, named after the room's
+own id — already an md5 of the primary project's resolved path
+(`room_id_for_path()`) — so the room id and session id line up without a
+second lookup table, regardless of how many projects join later:
 
 ```
 ~/.agent-session-root/
   <room_id>/
     manifest.json
-    project/
+    project/            # the room's primary project — never removable
+      index.json
+      synthesis.json
+    backend/             # an additional project, attached via /project/add
       index.json
       synthesis.json
 ```
 
 `Room._ensure_workspace_project()` attaches (idempotently) and
-synchronously reconciles this project every time a room becomes active —
-freshly created, resumed, or re-bootstrapped — and starts a background
-`ProjectWatcher` for it, tracked for the life of the server process
-(`service/rooms.py`'s `ROOM_WATCHERS`, stopped by
+synchronously reconciles every project in `self.projects` every time a
+room becomes active — freshly created, resumed, re-bootstrapped, or
+right after a `/project/add`/`/project/remove` — and starts a background
+`ProjectWatcher` per project, tracked for the life of the server process
+(`service/rooms.py`'s `ROOM_WATCHERS`, keyed by `(room_id, project_name)`
+since a room can now have more than one, stopped by
 `stop_all_room_watchers()` in `wire/app.py`'s shutdown). This is what
 keeps per-file signatures fresh regardless of what the bootstrap
-decision below does.
+decision below does. `synthesis.json` — the one cached `ProjectSynthesis`
+per room — always stays filed under the primary project only, by design;
+adding or removing a secondary project always triggers a real
+`run_resync()` rather than trusting or invalidating that cache silently.
 
 **Every bootstrap seeds from the lightweight (tier-1) index first**
 (`Room._collect_and_start()`, via `_workspace_context()` /
 `to_lightweight_context()`) — regardless of whether a cached answer
-exists, since the reconcile above already guarantees the index is built
-by this point. `agent/`'s own `ContextCollector`/`tool.metadata` path
-(a shallow, non-recursive single-directory listing) is no longer used by
-Room at all; the compact, per-file-description map is what every
-analysis — first-ever, cached, or a confirmed resync — starts from. Full
-per-file structural detail (functions/classes/variables) is never sent
-up front; the agent fetches it on demand, one file at a time, via the
-`describe` tool (`tool/describe.py`) before falling back to `cat` for
-real source — see "Two-tier metadata" below.
+exists, since the reconcile above already guarantees every attached
+project's index is built by this point. `to_lightweight_context()` is
+called with no project filter, so it renders one `## Project: <name>
+(<root>)` section per attached project automatically — `_workspace_context()`
+never has to loop over `self.projects` itself. `agent/`'s own
+`ContextCollector`/`tool.metadata` path (a shallow, non-recursive
+single-directory listing) is no longer used by Room at all; the compact,
+per-file-description map is what every analysis — first-ever, cached, a
+confirmed resync, or a project add/remove — starts from. Full per-file
+structural detail (functions/classes/variables) is never sent up front;
+the agent fetches it on demand, one file at a time, via the `describe`
+tool (`tool/describe.py`, addressed with an optional `project` argument
+for anything beyond the primary project) before falling back to `cat`
+for real source — see "Two-tier metadata" below.
 
 After that seeding, look up a cached `ProjectSynthesis` (`synthesis.json`)
 to decide whether an LLM call is needed at all:

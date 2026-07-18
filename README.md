@@ -69,9 +69,22 @@ cp .env.example .env
 | `AGENT_WS_HOST` | `127.0.0.1` | Where the agent server listens, and where the CLI looks for one. |
 | `AGENT_WS_PORT` | `8765` | Same, for the port. |
 | `AGENT_VERBOSE` | unset | Also print (not just log) raw LLM request/response lines. |
+| `NOTION_API_KEY` | unset | Optional. Enables the `notion_search`/`notion_read_page`/`notion_create_page`/`notion_append_text` tools. |
 
 The backend is any OpenAI-compatible API, so `GAPGPT_BASE_URL` can point at
 OpenAI, a local Ollama server, or anything else that speaks the same protocol.
+
+### Notion tools (optional)
+
+Setting `NOTION_API_KEY` gives the agent tools to search, read, and write
+pages in a connected Notion workspace — a separate, external system, not
+one of the local projects it's confined to. Create an internal
+integration at [notion.so/my-integrations](https://www.notion.so/my-integrations),
+copy its token into `NOTION_API_KEY`, then in Notion share whichever
+pages the integration should see (it has no access to anything not
+explicitly shared with it). Without a key set, the Notion tools are
+still offered to the agent, but every call just returns a plain error
+saying so — nothing else in the app is affected.
 
 ## Usage
 
@@ -256,6 +269,7 @@ change.
 | `create_directory` | Create a directory. |
 | `execute` | Run a shell command in the project. |
 | `ask` | Put a question back to *you* when the project can't settle it — routed through `core/ask_context.py` rather than any specific transport, so this tool works the same whether it's a room asking a connected client, a test, or nothing at all. |
+| `notion_search`, `notion_read_page`, `notion_create_page`, `notion_append_text` | Search/read/write pages in a connected Notion workspace via the real Notion API (`tool/notion.py`) — a separate external system, gated behind an optional `NOTION_API_KEY`. See [Notion tools](#notion-tools-optional). |
 
 `delete` and `metadata` exist in `tool/` but set `AGENT_TOOL = False` at
 module level, which keeps them out of `AGENT_TOOLS` while leaving them
@@ -371,30 +385,40 @@ agent-session serialize test_session --project p1   # compact LLM-ready context
 ```
 
 `service/rooms.py` also uses this store directly at room-bootstrap time:
-every room attaches its project here (keyed by the room's own id) and
+every room attaches its project(s) here (keyed by the room's own id) and
 checks for a cached prior analysis before ever calling the LLM — a
 repeat run of an unchanged project answers instantly from cache, and a
 project that's drifted too much since that cache was made prompts the
-client for a `/resync` instead of silently trusting or discarding it.
-Every bootstrap — first-ever, cached, or a confirmed resync — seeds the
-agent with only a lightweight, one-line-per-file map, never every file's
-full signatures up front; the agent escalates to a `describe(path)` tool
-for one file's actual structure, and to `cat` for real source, only when
-the question actually needs it. See [`docs/SESSIONS.md`](docs/SESSIONS.md)
-for the on-disk layout, the metadata schema, the room-bootstrap
-integration, the two-tier metadata design, and the invariants that keep
-it crash-safe and race-free.
+client for a `/resync` instead of silently trusting or discarding it. A
+room isn't limited to one project: `/project/add`/`/project/remove` (or
+the TUI's `/add`/`/remove` commands) attach or detach additional projects
+mid-conversation, each addressed by name via a tool call's optional
+`project` argument (omit it for the room's own primary project) — see
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md)'s routes table. Every bootstrap —
+first-ever, cached, a confirmed resync, or a project add/remove — seeds
+the agent with only a lightweight, one-line-per-file map spanning every
+attached project, never every file's full signatures up front; the agent
+escalates to a `describe(path, project=...)` tool for one file's actual
+structure, and to `cat` for real source, only when the question actually
+needs it. See [`docs/SESSIONS.md`](docs/SESSIONS.md) for the on-disk
+layout, the metadata schema, the room-bootstrap integration, the
+two-tier metadata design, and the invariants that keep it crash-safe and
+race-free.
 
 ### Safety
 
 Two restrictions are enforced in `core/guard.py`, so every tool inherits them:
 
-- **The agent is confined to the project folder.** Paths are resolved before
-  they're checked, so `..`, absolute paths, and symlinks pointing outside are
-  all refused. The root itself is a contextvar, not a plain global — the
-  server can run several rooms concurrently, each on a different project, so
-  a root set inside one room's worker thread is invisible to every other
-  room's (the same isolation `core/ask_context.py` uses for the `ask` tool).
+- **The agent is confined to the room's attached project(s).** Paths are
+  resolved before they're checked, so `..`, absolute paths, and symlinks
+  pointing outside are all refused; a tool call's optional `project`
+  argument picks which attached project a path is resolved against
+  (defaulting to the room's primary project), and an unrecognized project
+  name is refused rather than silently falling back. The confinement set
+  itself is a contextvar, not a plain global — the server can run several
+  rooms concurrently, each on different project(s), so the roots set
+  inside one room's worker thread are invisible to every other room's
+  (the same isolation `core/ask_context.py` uses for the `ask` tool).
 - **Env files are unreadable.** `.env` and `.env.*` are filtered out of
   listings, excluded from the project map, and cannot be read or written — a
   single `cat .env` would otherwise put your API key into an LLM request and

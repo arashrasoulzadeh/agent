@@ -158,9 +158,7 @@ class _Handler(FileSystemEventHandler):
 
     def _rel(self, path: str) -> str | None:
         try:
-            return Path(path).relative_to(
-                self.owner.indexer.project_root
-            ).as_posix()
+            return Path(path).relative_to(self.owner.indexer.project_root).as_posix()
         except ValueError:
             return None
 

@@ -24,8 +24,9 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Input, RichLog, Static
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, Input, Label, RichLog, Static
 
 from ui import answer, error, style, trace
 
@@ -42,8 +43,76 @@ def _resync_prompt_text(data: dict[str, Any]) -> str:
     )
 
 
+_COMMANDS = {"/add", "/remove", "/projects"}
+
+
+def _parse_command(value: str) -> tuple[str, list[str]] | None:
+    """Recognizes only `/add`, `/remove`, `/projects` — anything else
+    (ordinary chat text, a bare "y"/"n" resync reply, an unrelated
+    slash-prefixed typo) returns None and falls through to normal
+    handling."""
+    if not value.startswith("/"):
+        return None
+    parts = value.split()
+    command = parts[0]
+    if command not in _COMMANDS:
+        return None
+    return command, parts[1:]
+
+
 class ServerError(Exception):
     """The server responded with `{"ok": false}` to a request."""
+
+
+class QuestionModal(ModalScreen[str | None]):
+    """One button per option for the agent's `ask(question, options=...)`.
+
+    Dismisses with the clicked option's own label, or None on Escape —
+    closing this without a choice leaves free-text entry as the
+    fallback (the footer input's placeholder is already switched to
+    "Your answer…" by the caller before this is pushed, so nothing is
+    lost by backing out).
+    """
+
+    BINDINGS = [("escape", "dismiss(None)", "Cancel")]
+
+    DEFAULT_CSS = """
+    QuestionModal {
+        align: center middle;
+    }
+    QuestionModal #question-box {
+        width: auto;
+        max-width: 80%;
+        border: heavy $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+    QuestionModal #question-text {
+        margin-bottom: 1;
+    }
+    QuestionModal #question-buttons {
+        align: center middle;
+        height: auto;
+    }
+    QuestionModal #question-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, question: str, options: list[str]):
+        super().__init__()
+        self.question = question
+        self.options = options
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="question-box"):
+            yield Label(self.question, id="question-text")
+            with Horizontal(id="question-buttons"):
+                for i, option in enumerate(self.options):
+                    yield Button(option, id=f"opt-{i}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(str(event.button.label))
 
 
 class AgentApp(App):
@@ -100,6 +169,7 @@ class AgentApp(App):
 
         self.model = "loading"
         self.base_url = "loading"
+        self.projects: list[dict[str, Any]] = []
         self.tool_names: list[str] = []
         self.active_tool: str | None = None
         self.status_label: str | None = "connecting"
@@ -221,6 +291,11 @@ class AgentApp(App):
         elif name == "question":
             self.write(Text(f"? {data['text']}", style=style.QUESTION))
             self.query_one("#footer-input", Input).placeholder = "Your answer…"
+            options = data.get("options")
+            if options:
+                self.push_screen(
+                    QuestionModal(data["text"], options), self._on_question_answered
+                )
         elif name == "answer":
             answer.show(self, data["text"])
         elif name == "error":
@@ -264,6 +339,7 @@ class AgentApp(App):
     def _apply_state(self, data: dict[str, Any]) -> None:
         self.model = data.get("model", self.model)
         self.base_url = data.get("base_url", self.base_url)
+        self.projects = data.get("projects", self.projects)
         self.tool_names = data.get("tools", self.tool_names)
         self.turn_active = data.get("turn_active", self.turn_active)
         self.status_label = data.get("status_label")
@@ -279,9 +355,14 @@ class AgentApp(App):
             footer_input.placeholder = "y/n"
         else:
             footer_input.placeholder = "Ask a follow-up, or 'exit' to quit."
-        self.query_one("#footer-info", Static).update(
-            f"project {data.get('path', self.path)}   room {self.room}"
-        )
+        if len(self.projects) > 1:
+            names = ", ".join(
+                p["name"] for p in sorted(self.projects, key=lambda p: p["name"])
+            )
+            info_text = f"projects {names}   room {self.room}"
+        else:
+            info_text = f"project {data.get('path', self.path)}   room {self.room}"
+        self.query_one("#footer-info", Static).update(info_text)
         self.refresh_header()
 
     def refresh_header(self) -> None:
@@ -338,6 +419,12 @@ class AgentApp(App):
             await self._safe_request("/resync", {"confirm": confirm})
             return
 
+        parsed = _parse_command(value)
+        if parsed is not None:
+            command, args = parsed
+            await self._handle_command(command, args)
+            return
+
         if self.turn_active:
             return
 
@@ -346,6 +433,49 @@ class AgentApp(App):
             return
 
         await self._safe_request("/prompt", {"text": value})
+
+    async def _handle_command(self, command: str, args: list[str]) -> None:
+        if command == "/projects":
+            self._show_projects()
+            return
+        if command == "/add":
+            if not args:
+                self.write(Text("Usage: /add <path> [name]", style=style.INFO))
+                return
+            data: dict[str, str] = {"path": args[0]}
+            if len(args) > 1:
+                data["name"] = args[1]
+            await self._safe_request("/project/add", data)
+            return
+        if command == "/remove":
+            if not args:
+                self.write(Text("Usage: /remove <name>", style=style.INFO))
+                return
+            await self._safe_request("/project/remove", {"name": args[0]})
+            return
+
+    def _show_projects(self) -> None:
+        if not self.projects:
+            self.write(Text("No projects attached.", style=style.INFO))
+            return
+        lines = ["Attached projects:"]
+        for p in sorted(self.projects, key=lambda p: p["name"]):
+            marker = "primary" if p.get("primary") else "secondary"
+            lines.append(f"  {p['name']} ({marker})  {p['path']}")
+        self.write(Text("\n".join(lines), style=style.INFO))
+
+    def _on_question_answered(self, value: str | None) -> None:
+        """QuestionModal's dismiss callback. None means Escape — the
+        free-text footer input (already switched to "Your answer…"
+        when the question arrived) is still live as a fallback, so
+        there's nothing to do here."""
+        if value is None:
+            return
+        asyncio.create_task(self._deliver_reply(value))
+
+    async def _deliver_reply(self, value: str) -> None:
+        self.write(Text(f"> {value}", style=style.MESSAGE))
+        await self._safe_request("/reply", {"text": value})
 
     async def _safe_request(self, route: str, data: dict) -> None:
         try:

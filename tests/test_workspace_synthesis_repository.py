@@ -37,9 +37,7 @@ class TestSynthesisRepository(unittest.TestCase):
         nested = self.project_dir / "nested" / "project"
         repo = SynthesisRepository(nested)
         repo.save(
-            ProjectSynthesis(
-                answer="a", synthesized="b", created_at="c", file_count=0
-            )
+            ProjectSynthesis(answer="a", synthesized="b", created_at="c", file_count=0)
         )
         self.assertTrue((nested / "synthesis.json").exists())
 

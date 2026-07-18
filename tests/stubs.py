@@ -91,7 +91,9 @@ class ToolCallingPipeline(StubPipeline):
 
 class AskToolPipeline(StubPipeline):
     """Like StubPipeline, but the question 'ask-me' drives the `ask` tool
-    via core.ask_context — exercising the same path tool/ask.py uses."""
+    via core.ask_context — exercising the same path tool/ask.py uses.
+    'ask-with-options' does the same but with a small set of known
+    answers, exercising the button-question path."""
 
     def ask(self, question: str) -> str:
         self.questions.append(question)
@@ -99,6 +101,11 @@ class AskToolPipeline(StubPipeline):
             from core import ask_context
 
             reply = ask_context.ask("what should I call this?")
+            return f"got: {reply}"
+        if question == "ask-with-options":
+            from core import ask_context
+
+            reply = ask_context.ask("pick one", options=["a", "b", "c"])
             return f"got: {reply}"
         return f"stub answer to: {question}"
 

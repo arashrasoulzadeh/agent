@@ -103,6 +103,9 @@ any request:
 | `/prompt` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Submits a follow-up question. Error if a turn is already running in this room. |
 | `/reply` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Answers the agent's own mid-turn `ask` question. Error if the room isn't currently awaiting one. |
 | `/resync` | `{"room": "<id>", "confirm": true\|false}` | `{"accepted": true}` | Responds to a `resync.suggested` event (below). `confirm: true` re-analyzes the project from scratch (a real LLM call) and refreshes the cached synthesis; `confirm: false` just clears the pending flag and leaves the existing (possibly stale) cached answer in place. Error if no resync is pending for this room, or a turn is already running. |
+| `/project/add` | `{"room": "<id>", "path": "...", "name": "..."?}` | `{"name": "<attached-name>", "projects": [{"name", "path", "primary"}, ...]}` | Attaches an additional project to this room. `name` defaults to the path's basename. Error if `name` already names a *different* path in this room, or a turn is already running. Immediately re-analyzes the room (like a confirmed `/resync`) so the cached overview covers every attached project — a `session.state` broadcast lands right away with the updated project list, followed by the usual turn events as the reanalysis runs. |
+| `/project/remove` | `{"room": "<id>", "name": "..."}` | `{"projects": [...]}` | Detaches a project and stops its background watcher. Error if `name` is the room's own primary project (its identity — never removable), `name` isn't attached, or a turn is already running. Also triggers an immediate reanalysis, same as `/project/add`. |
+| `/project/list` | `{"room": "<id>"}` | `{"projects": [{"name", "path", "primary"}, ...]}` | Every project currently attached to the room — no mutation, no turn. |
 | `/rooms/list` | `{}` | `{"rooms": [{"id", "path", "updated_at"}, ...]}` | Every room saved to disk, newest first — for a resume picker. |
 
 ## Events
@@ -113,23 +116,27 @@ clients open on the same room see the same conversation as it happens).
 
 | Event | `data` | When |
 | --- | --- | --- |
-| `session.state` | `{path, model, base_url, tools, turn_active, status_label, awaiting_reply, resync_suggested, active_tool, tokens}` | Right after `/session/create`/`/session/resume` land as the *response*'s data too — this event fires again any time any of these fields change. It's the one generic "something about this room changed" signal; a minimal client could ignore every other event and just re-render from this one. `status_label` is `"reading the project"`, `"thinking"`, or `null`. |
+| `session.state` | `{path, projects, model, base_url, tools, turn_active, status_label, awaiting_reply, resync_suggested, active_tool, tokens}` | Right after `/session/create`/`/session/resume` land as the *response*'s data too — this event fires again any time any of these fields change. It's the one generic "something about this room changed" signal; a minimal client could ignore every other event and just re-render from this one. `status_label` is `"reading the project"`, `"thinking"`, or `null`. `projects` is `[{"name", "path", "primary"}, ...]` — every project currently attached to the room (see `/project/add`/`/project/remove`/`/project/list` above); `path` stays the primary project's own path, unchanged. |
 | `message` | `{role: "user", text}` | A prompt or reply was submitted — echoed to every client in the room, including the one that sent it, so all views append it in the same place in the transcript. |
 | `tool.call` | `{name, args}` | A tool invocation starts. |
 | `tool.result` | `{output}` | A tool invocation returns. |
 | `tokens` | `{prompt, completion, total}` | Usage updated after an LLM call. |
-| `question` | `{text}` | The agent's own mid-turn question (the `ask` tool). Answer it with `/reply`; `session.state.awaiting_reply` is `true` until then. |
+| `question` | `{text, options}` | The agent's own mid-turn question (the `ask` tool). `options` is `null` for an open-ended question, or a small list of known answers (e.g. `["npm", "yarn", "pnpm"]`) the client can offer as one-click choices instead of free text. Either way, answer it with `/reply` — the reply is just a string, whether typed or a chosen option's own text; `session.state.awaiting_reply` is `true` until then. |
 | `answer` | `{text}` | The turn's final answer, markdown. |
 | `resync.suggested` | `{changed, total, fraction}` | The project has drifted (files added/removed/content-changed) past a threshold since its cached analysis was made — the bootstrap answer shown is that (possibly stale) cache. Answer with `/resync`; `session.state.resync_suggested` is `true` until then. |
 | `error` | `{message}` | A turn failed. Already mapped from the exception type to a plain-English line (see `wire/errors.py`) — nothing further to translate client-side. |
 
 ## Rooms and persistence
 
-Every session is a room, identified by an id derived from its project
-path (not a random one — `service/rooms.py`'s `room_id_for_path()`, an
-md5 of the resolved absolute path), so analyzing the same project again
-always finds the same room. A room owns one project's conversation: its
-pipeline, its message history, its token totals. As long as the server
+Every session is a room, identified by an id derived from its primary
+project's path (not a random one — `service/rooms.py`'s
+`room_id_for_path()`, an md5 of the resolved absolute path), so
+analyzing the same project again always finds the same room. A room owns
+one conversation, which may span several attached projects (see
+`/project/add`): one pipeline, one message history, one token total,
+covering every project attached to it. The room's own id and primary
+project never change once created — only added/removed projects are
+mutable. As long as the server
 process is running, a room stays live in memory whether or not any
 client is currently attached to it — that's what lets a second client
 join an in-progress conversation with `/session/resume` without
@@ -144,12 +151,19 @@ resumable even after the server itself has been restarted:
 {
   "id": "<id>",
   "path": "/abs/project/path",
+  "projects": {"project": "/abs/project/path", "backend": "/abs/other/path"},
   "created_at": "...", "updated_at": "...",
   "tokens": {"prompt": 0, "completion": 0, "total": 1234},
   "messages": [ ... the actual LangChain conversation, serialized ... ],
   "transcript": [ {"type": "tool_call", "name": "...", "args": "...", "ts": "..."}, ... ]
 }
 ```
+
+`projects` maps each attached project's name to its resolved path — the
+room's primary project is always keyed `"project"`. An older
+`rooms/{id}.json` written before multi-project support still loads
+correctly with no migration: a missing `"projects"` key just falls back
+to `{"project": path}`, exactly today's single-project shape.
 
 `messages` is what lets a resumed room's *agent* actually remember the
 prior conversation (tool calls included) rather than just showing a log

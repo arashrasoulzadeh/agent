@@ -14,8 +14,10 @@ import logging
 from typing import Any
 
 from service import rooms
+from service.rooms import CannotRemovePrimaryProject
 from wire.protocol import ProtocolError
 from wire.transport.base import Transport
+from workspace.manager import ProjectNameConflict, ProjectNotFound
 
 logger = logging.getLogger("wire.routes")
 
@@ -107,6 +109,47 @@ async def resync(transport: Transport, data: dict) -> dict:
     return {"accepted": True}
 
 
+async def project_add(transport: Transport, data: dict) -> dict:
+    room = _require_room(data)
+    path = data.get("path")
+    if not path:
+        raise ProtocolError("/project/add needs 'path'")
+    if not room.try_start_turn():
+        raise ProtocolError("a turn is already running in this room")
+    try:
+        name = room.add_project(path, data.get("name"))
+    except ProjectNameConflict as exc:
+        room.turn_active = False
+        raise ProtocolError(str(exc)) from exc
+    # Update the client's project list right away, rather than making it
+    # wait for the whole reanalysis turn run_resync() below fires off.
+    await room.broadcast_state()
+    _fire(room.run_resync())
+    return {"name": name, "projects": room.project_list()}
+
+
+async def project_remove(transport: Transport, data: dict) -> dict:
+    room = _require_room(data)
+    name = data.get("name")
+    if not name:
+        raise ProtocolError("/project/remove needs 'name'")
+    if not room.try_start_turn():
+        raise ProtocolError("a turn is already running in this room")
+    try:
+        room.remove_project(name)
+    except (CannotRemovePrimaryProject, ProjectNotFound) as exc:
+        room.turn_active = False
+        raise ProtocolError(str(exc)) from exc
+    await room.broadcast_state()
+    _fire(room.run_resync())
+    return {"projects": room.project_list()}
+
+
+async def project_list(transport: Transport, data: dict) -> dict:
+    room = _require_room(data)
+    return {"projects": room.project_list()}
+
+
 async def rooms_list(transport: Transport, data: dict) -> dict:
     return {"rooms": rooms.Room.list_saved()}
 
@@ -129,5 +172,8 @@ ROUTES: dict[str, Any] = {
     "/prompt": prompt,
     "/reply": reply,
     "/resync": resync,
+    "/project/add": project_add,
+    "/project/remove": project_remove,
+    "/project/list": project_list,
     "/rooms/list": rooms_list,
 }

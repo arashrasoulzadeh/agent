@@ -5,27 +5,21 @@ description every bootstrap already carries for each file.
 
 Needs to know which room's workspace project to look up — that's
 core/room_context.py's job (set by service/rooms.py on the same worker
-thread `core.guard.set_project_root()` already runs on), mirroring how
+thread `core.guard.set_project_roots()` already runs on), mirroring how
 `cat`/`ls` already rely on core.guard for path confinement.
 """
 
 from langchain_core.tools import tool
 
-from core import room_context
-from core.guard import (
-    is_secret,
-    outside_refusal,
-    project_root,
-    refusal,
-    resolve_in_root,
-)
+from core import guard, room_context
+from core.guard import resolve_file_or_refuse
 from workspace import config as workspace_config
 from workspace.index_repository import IndexRepository
 from workspace.serialize import render_file_signatures
 
 
 @tool
-def describe(path: str) -> str:
+def describe(path: str, project: str | None = None) -> str:
     """Return one file's structural signatures (functions, classes,
     variables) without reading its full source.
 
@@ -35,13 +29,12 @@ def describe(path: str) -> str:
 
     Args:
         path: Path to the file, inside the project.
+        project: Name of an attached project to describe a file from.
+            Omit to use the room's primary project.
     """
-    if is_secret(path):
-        return refusal(path)
-
-    target = resolve_in_root(path)
-    if target is None:
-        return outside_refusal(path)
+    target = resolve_file_or_refuse(path, project=project)
+    if isinstance(target, str):
+        return target
     if not target.is_file():
         return f"Error: {path!r} is not a file."
 
@@ -49,12 +42,9 @@ def describe(path: str) -> str:
     if room_id is None:
         return "Error: no active project session."
 
-    rel_path = target.relative_to(project_root()).as_posix()
-    project_dir = (
-        workspace_config.SESSION_ROOT
-        / room_id
-        / workspace_config.WORKSPACE_PROJECT_NAME
-    )
+    project_name = project or guard.primary_project()
+    rel_path = target.relative_to(guard.project_root(project)).as_posix()
+    project_dir = workspace_config.SESSION_ROOT / room_id / project_name
     index = IndexRepository(project_dir).load()
     if index is None:
         return "Error: no metadata index found for this project."

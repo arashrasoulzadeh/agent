@@ -204,9 +204,7 @@ class TestToLightweightContext(_ProjectFixtureMixin, unittest.TestCase):
 
     def test_unknown_project_raises(self):
         with self.assertRaises(ProjectNotFound):
-            to_lightweight_context(
-                "s1", project="nope", session_root=self.session_root
-            )
+            to_lightweight_context("s1", project="nope", session_root=self.session_root)
 
     def test_unknown_session_raises(self):
         with self.assertRaises(SessionNotFound):

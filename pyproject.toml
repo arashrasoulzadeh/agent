@@ -5,6 +5,7 @@ description = "An interactive CLI agent that reads a codebase and answers questi
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx",
     "langchain",
     "langchain-openai",
     "pathspec",

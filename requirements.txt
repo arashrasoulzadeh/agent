@@ -1,3 +1,4 @@
+httpx
 langchain
 langchain-openai
 pathspec

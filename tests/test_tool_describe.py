@@ -25,23 +25,40 @@ class TestDescribe(unittest.TestCase):
         )
         (self.project_dir / "README.md").write_text("# hi\n")
 
+        self.other_dir = Path(tempfile.mkdtemp())
+        (self.other_dir / "bar.py").write_text(
+            '"""Does bar things."""\n\ndef do_bar() -> None:\n    pass\n'
+        )
+
         manager = SessionManager(session_root=self.session_root)
         self.room_id = "test-room"
         manager.create(self.room_id)
         manager.attach(
             self.room_id, self.project_dir, project_name=WORKSPACE_PROJECT_NAME
         )
+        manager.attach(self.room_id, self.other_dir, project_name="other")
 
-        guard.set_project_root(self.project_dir)
+        # Matches how service/rooms.py's Room really confines a
+        # multi-project room — set_project_roots() with the primary
+        # named WORKSPACE_PROJECT_NAME, not the single-project
+        # set_project_root() convenience wrapper (which pins an
+        # internal-only sentinel name unrelated to the workspace's own
+        # project-naming convention).
+        guard.set_project_roots(
+            {WORKSPACE_PROJECT_NAME: self.project_dir, "other": self.other_dir},
+            primary=WORKSPACE_PROJECT_NAME,
+        )
         room_context.set_current_room(self.room_id)
 
     def tearDown(self):
         shutil.rmtree(self.session_root, ignore_errors=True)
         shutil.rmtree(self.project_dir, ignore_errors=True)
-        guard._project_root.set(None)
+        shutil.rmtree(self.other_dir, ignore_errors=True)
+        guard._project_roots.set(None)
+        guard._primary_project.set(None)
         room_context.set_current_room(None)
 
-    def _describe(self, path: str) -> str:
+    def _describe(self, path: str, project: str | None = None) -> str:
         # workspace/config.py's SESSION_ROOT is read at call time inside
         # describe() itself, not import time - patch the module
         # attribute exactly the way tests/stubs.py's running_server does
@@ -52,7 +69,10 @@ class TestDescribe(unittest.TestCase):
         original = workspace_config.SESSION_ROOT
         workspace_config.SESSION_ROOT = self.session_root
         try:
-            return describe.invoke({"path": path})
+            args = {"path": path}
+            if project is not None:
+                args["project"] = project
+            return describe.invoke(args)
         finally:
             workspace_config.SESSION_ROOT = original
 
@@ -86,6 +106,23 @@ class TestDescribe(unittest.TestCase):
         room_context.set_current_room(None)
         result = self._describe("foo.py")
         self.assertIn("no active project session", result)
+
+    def test_named_non_primary_project_resolves_correctly(self):
+        result = self._describe("bar.py", project="other")
+        self.assertIn("bar.py", result)
+        self.assertIn("Does bar things.", result)
+        self.assertIn("def do_bar()", result)
+
+    def test_unknown_project_name_refused(self):
+        result = self._describe("bar.py", project="mobile")
+        self.assertIn("not an attached project", result)
+
+    def test_omitted_project_defaults_to_primary_not_other(self):
+        # "bar.py" only exists in "other" - omitting project= resolves
+        # against the primary project instead (never silently reaching
+        # into "other"), where no such file exists.
+        result = self._describe("bar.py")
+        self.assertIn("is not a file", result)
 
 
 if __name__ == "__main__":

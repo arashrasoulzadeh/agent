@@ -2,23 +2,22 @@
 
 from langchain_core.tools import tool
 
-from core.guard import is_secret, outside_refusal, refusal, resolve_in_root
+from core.guard import resolve_file_or_refuse
 
 
 @tool
-def edit(path: str, content: str) -> str:
+def edit(path: str, content: str, project: str | None = None) -> str:
     """Replace the full contents of a file that already exists.
 
     Args:
         path: Path to the file to edit, inside the project. It must exist.
         content: The new full contents of the file.
+        project: Name of an attached project to edit in. Omit to use the
+            room's primary project.
     """
-    if is_secret(path):
-        return refusal(path)
-
-    target = resolve_in_root(path)
-    if target is None:
-        return outside_refusal(path)
+    target = resolve_file_or_refuse(path, project=project)
+    if isinstance(target, str):
+        return target
     if not target.is_file():
         return f"Error: {path!r} is not an existing file."
 

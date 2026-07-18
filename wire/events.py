@@ -20,6 +20,9 @@ logger = logging.getLogger("wire.events")
 
 # Sent right after create/resume, and again whenever any of its fields
 # change — the generic "something about this room's state changed" signal.
+# data includes "projects": [{"name", "path", "primary"}, ...] — every
+# project currently attached to the room, "primary" marking the one its
+# id is derived from (service/rooms.py's WORKSPACE_PROJECT_NAME).
 SESSION_STATE = "session.state"
 
 # Echoes a submitted prompt/reply to every client in the room, including
@@ -32,6 +35,10 @@ TOKENS = "tokens"
 
 # The agent's own mid-turn question; the client should prompt the user
 # and answer it with a /reply request.
+# data: {"text": str, "options": list[str] | None} — options, when
+# present, is a small set of known answers the client can offer as
+# one-click choices (e.g. buttons) instead of free text; the reply is
+# still just a string either way, so /reply is unchanged.
 QUESTION = "question"
 
 ANSWER = "answer"

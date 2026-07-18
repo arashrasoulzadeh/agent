@@ -13,7 +13,7 @@ from core import ask_context
 
 
 @tool
-def ask(question: str) -> str:
+def ask(question: str, options: list[str] | None = None) -> str:
     """Ask the user a question and return their answer.
 
     Use this when you are genuinely unsure or need information only the
@@ -23,8 +23,12 @@ def ask(question: str) -> str:
 
     Args:
         question: The question to put to the user.
+        options: If this is a choice between a small set of known
+            answers, list them here (e.g. ["npm", "yarn", "pnpm"]) so
+            the user gets clickable buttons instead of free text. Omit
+            for an open-ended question.
     """
-    reply = ask_context.ask(question)
+    reply = ask_context.ask(question, options)
     if reply is None:
         return "The user did not answer. Proceed with your best judgement."
     if not reply:

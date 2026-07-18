@@ -7,31 +7,24 @@ out of AGENT_TOOLS while still leaving it importable directly.
 
 from langchain_core.tools import tool
 
-from core.guard import (
-    is_secret,
-    outside_refusal,
-    project_root,
-    refusal,
-    resolve_in_root,
-)
+from core.guard import project_root, resolve_file_or_refuse
 
 AGENT_TOOL = False
 
 
 @tool
-def delete(path: str) -> str:
+def delete(path: str, project: str | None = None) -> str:
     """Delete a file, or an empty directory, inside the project.
 
     Args:
         path: Path to remove, inside the project.
+        project: Name of an attached project to delete from. Omit to use
+            the room's primary project.
     """
-    if is_secret(path):
-        return refusal(path)
-
-    target = resolve_in_root(path)
-    if target is None:
-        return outside_refusal(path)
-    if target == project_root():
+    target = resolve_file_or_refuse(path, project=project)
+    if isinstance(target, str):
+        return target
+    if target == project_root(project):
         return "Error: refusing to delete the project root."
 
     try:

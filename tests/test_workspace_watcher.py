@@ -92,8 +92,10 @@ class TestProjectWatcher(unittest.TestCase):
             self._write("burst.py", f"version {i}")
         expected = hashlib.sha256(b"version 4").hexdigest()
         wait_until(
-            lambda: self.index.files.get("burst.py")
-            and self.index.files["burst.py"].sha256 == expected
+            lambda: (
+                self.index.files.get("burst.py")
+                and self.index.files["burst.py"].sha256 == expected
+            )
         )
 
     def test_moving_a_directory_preserves_derived_data(self):

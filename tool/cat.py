@@ -2,22 +2,21 @@
 
 from langchain_core.tools import tool
 
-from core.guard import is_secret, outside_refusal, refusal, resolve_in_root
+from core.guard import resolve_file_or_refuse
 
 
 @tool
-def cat(path: str) -> str:
+def cat(path: str, project: str | None = None) -> str:
     """Read and return the contents of a text file.
 
     Args:
         path: Path to the file to read, inside the project.
+        project: Name of an attached project to read from. Omit to use
+            the room's primary project.
     """
-    if is_secret(path):
-        return refusal(path)
-
-    target = resolve_in_root(path)
-    if target is None:
-        return outside_refusal(path)
+    target = resolve_file_or_refuse(path, project=project)
+    if isinstance(target, str):
+        return target
     if not target.is_file():
         return f"Error: {path!r} is not a file."
 

@@ -6,15 +6,17 @@ from core.guard import outside_refusal, resolve_in_root
 
 
 @tool
-def create_directory(path: str) -> str:
+def create_directory(path: str, project: str | None = None) -> str:
     """Create a directory, and any missing parents, inside the project.
 
     Args:
         path: Directory to create, inside the project.
+        project: Name of an attached project to create it in. Omit to
+            use the room's primary project.
     """
-    target = resolve_in_root(path)
+    target = resolve_in_root(path, project=project)
     if target is None:
-        return outside_refusal(path)
+        return outside_refusal(path, project=project)
     if target.is_dir():
         return f"{path} already exists."
 

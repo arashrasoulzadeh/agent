@@ -70,7 +70,12 @@ from workspace.config import WORKSPACE_PROJECT_NAME
 from workspace.ignore import IgnoreRules
 from workspace.index_repository import IndexRepository
 from workspace.indexer import ProjectIndexer
-from workspace.manager import SessionAlreadyExists, SessionManager
+from workspace.manager import (
+    ProjectNameConflict,
+    ProjectNotFound,
+    SessionAlreadyExists,
+    SessionManager,
+)
 from workspace.serialize import to_lightweight_context
 from workspace.synthesis_repository import SynthesisRepository
 from workspace.watcher import ProjectWatcher
@@ -92,6 +97,7 @@ BOOTSTRAP_QUERY = (
 # that's what lets a second client attach to an in-progress conversation
 # without reloading it from disk.
 ROOMS: dict[str, "Room"] = {}
+
 
 def default_pipeline_factory(
     config: PipelineConfig, events: StageEventBus, room: "Room"
@@ -156,35 +162,57 @@ def room_id_for_path(path: str) -> str:
 RESYNC_CHANGE_THRESHOLD = 0.2
 
 # Tracks each room's background ProjectWatcher (workspace/watcher.py) for
-# the life of the server process — started the first time a room's
-# project is attached (Room._ensure_watcher()), stopped by
+# the life of the server process — started the first time a (room,
+# project) pair is attached (Room._ensure_watcher()), stopped by
 # stop_all_room_watchers() in wire/app.py's serve() shutdown, alongside
-# module lifecycle.stop_all().
-ROOM_WATCHERS: dict[str, ProjectWatcher] = {}
+# module lifecycle.stop_all(). Keyed by (room_id, project_name), not just
+# room_id, since a room can now have more than one attached project, each
+# with its own watcher.
+ROOM_WATCHERS: dict[tuple[str, str], ProjectWatcher] = {}
+
+
+class CannotRemovePrimaryProject(Exception):
+    """Raised by Room.remove_project() when asked to detach a room's own
+    primary project — the one its id is derived from (room_id_for_path()),
+    which must never change once a room exists."""
 
 
 def stop_all_room_watchers() -> None:
-    for watcher in ROOM_WATCHERS.values():
-        watcher.stop()
+    # One misbehaving watcher must never stop the rest from being
+    # stopped/cleared — this runs at server shutdown and at the end of
+    # every test using tests/stubs.py's running_server(), so a single bad
+    # entry aborting the loop early would leak every watcher after it.
+    for key, watcher in list(ROOM_WATCHERS.items()):
+        try:
+            watcher.stop()
+        except Exception:
+            logger.exception("failed to stop project watcher for %r", key)
     ROOM_WATCHERS.clear()
 
 
-def _workspace_project_dir(room_id: str) -> Path:
-    return SessionManager().session_root / room_id / WORKSPACE_PROJECT_NAME
+def _workspace_project_dir(
+    room_id: str, project_name: str = WORKSPACE_PROJECT_NAME
+) -> Path:
+    return SessionManager().session_root / room_id / project_name
 
 
 def _workspace_context(room_id: str, path: str) -> ProjectContext:
-    """The lightweight, tier-1 ProjectContext for a room's project (path
-    + one-line description per file, no full signatures — see
-    workspace/serialize.py's to_lightweight_context()), built from
-    workspace/'s cached index rather than a fresh ContextCollector walk.
-    Full per-file structural detail is available on demand via the
-    `describe` tool (tool/describe.py). Caller must ensure the workspace
-    project is already attached/reconciled (_ensure_workspace_project())
-    first."""
+    """The lightweight, tier-1 ProjectContext spanning EVERY project
+    attached to this room (path + one-line description per file, no full
+    signatures — see workspace/serialize.py's to_lightweight_context()),
+    built from workspace/'s cached indexes rather than a fresh
+    ContextCollector walk. Passing no `project` filter to
+    to_lightweight_context() already renders one '## Project: name (root)'
+    section per attachment — no manual loop needed here. Full per-file
+    structural detail is available on demand via the `describe` tool
+    (tool/describe.py). Caller must ensure every attached project is
+    already attached/reconciled (_ensure_workspace_project()) first.
+    `path` stays the room's primary project's resolved path (this
+    field's existing meaning), even though `raw` may describe more than
+    one project."""
     return ProjectContext(
         path=str(Path(path).expanduser().resolve()),
-        raw=to_lightweight_context(room_id, project=WORKSPACE_PROJECT_NAME),
+        raw=to_lightweight_context(room_id),
     )
 
 
@@ -216,6 +244,32 @@ def _change_fraction(old_index: ProjectIndex | None, new_index: ProjectIndex) ->
     return changed / total
 
 
+ReconcileResults = dict[str, tuple[ProjectIndex | None, ProjectIndex]]
+
+
+def _aggregate_index_diff(results: ReconcileResults) -> tuple[int, int]:
+    """_index_diff(), summed across every attached project."""
+    changed = total = 0
+    for old_index, new_index in results.values():
+        c, t = _index_diff(old_index, new_index)
+        changed += c
+        total += t
+    return changed, total
+
+
+def _aggregate_change_fraction(results: ReconcileResults) -> float:
+    """_change_fraction(), generalized across every attached project:
+    if ANY attached project has no prior baseline at all, the whole set
+    reads as fully changed — same "no baseline = fully changed" rule
+    _change_fraction() already applies to a single project. Numerically
+    identical to _change_fraction() for a single-project room (its dict
+    has exactly one entry)."""
+    if any(old is None or not old.files for old, _ in results.values()):
+        return 1.0
+    changed, total = _aggregate_index_diff(results)
+    return changed / total if total else 0.0
+
+
 class RoomSink:
     """Reports one room's tool activity as broadcast protocol events."""
 
@@ -241,9 +295,18 @@ class RoomSink:
 
 
 class Room:
-    def __init__(self, room_id: str, path: str, loop: asyncio.AbstractEventLoop):
+    def __init__(
+        self,
+        room_id: str,
+        path: str,
+        loop: asyncio.AbstractEventLoop,
+        projects: dict[str, str] | None = None,
+    ):
         self.id = room_id
-        self.path = path
+        self.path = path  # the primary/identity project's path — unchanged meaning
+        self.projects: dict[str, str] = (
+            dict(projects) if projects is not None else {WORKSPACE_PROJECT_NAME: path}
+        )
         self.loop = loop
         self.clients: set[Transport] = set()
         self.turn_active = False
@@ -296,7 +359,7 @@ class Room:
         if raw is None:
             return None
 
-        room = cls(raw["id"], raw["path"], loop)
+        room = cls(raw["id"], raw["path"], loop, projects=raw.get("projects"))
         room.tokens = raw.get("tokens", room.tokens)
         room.created_at = raw.get("created_at", room.created_at)
         room.transcript = raw.get("transcript", [])
@@ -333,6 +396,7 @@ class Room:
         payload = {
             "id": self.id,
             "path": self.path,
+            "projects": dict(self.projects),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "tokens": self.tokens,
@@ -364,6 +428,7 @@ class Room:
         return {
             "id": self.id,
             "path": self.path,
+            "projects": self.project_list(),
             "model": os.getenv("GAPGPT_MODEL", "gpt-4o-mini"),
             "base_url": os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1"),
             "tools": TOOL_NAMES,
@@ -460,8 +525,51 @@ class Room:
             return
         await self._run_turn(BOOTSTRAP_QUERY, cache_after=True)
 
+    def project_list(self) -> list[dict[str, Any]]:
+        return [
+            {"name": name, "path": path, "primary": name == WORKSPACE_PROJECT_NAME}
+            for name, path in sorted(self.projects.items())
+        ]
+
+    def add_project(self, path: str, name: str | None = None) -> str:
+        """Registers a new project against this room's own state only —
+        the real attach/reconcile (workspace.manager.SessionManager.attach())
+        happens later, inside _ensure_workspace_project(), the next time
+        run_resync() runs (always triggered right after this by the
+        caller — see wire/routes.py's /project/add). Raises
+        ProjectNameConflict if `name` already maps to a different path in
+        this room, mirroring SessionManager.attach()'s own check."""
+        resolved = str(Path(path).expanduser().resolve())
+        project_name = name or Path(resolved).name
+        existing = self.projects.get(project_name)
+        if existing is not None and Path(existing).resolve() != Path(resolved):
+            raise ProjectNameConflict(
+                f"project name {project_name!r} is already attached to "
+                f"{existing!r}, not {resolved!r}"
+            )
+        self.projects[project_name] = resolved
+        self.save()
+        return project_name
+
+    def remove_project(self, name: str) -> None:
+        """Detaches `name` from both the workspace store and this room's
+        own state, and stops its ProjectWatcher. Never allows removing
+        the room's own primary project (its identity)."""
+        if name == WORKSPACE_PROJECT_NAME:
+            raise CannotRemovePrimaryProject(
+                f"{name!r} is this room's primary project and cannot be removed"
+            )
+        if name not in self.projects:
+            raise ProjectNotFound(f"project {name!r} is not attached to this room")
+        SessionManager().detach(self.id, name)
+        watcher = ROOM_WATCHERS.pop((self.id, name), None)
+        if watcher is not None:
+            watcher.stop()
+        del self.projects[name]
+        self.save()
+
     def _collect_and_start_for_resync(self) -> None:
-        guard.set_project_root(self.path)
+        guard.set_project_roots(self.projects, primary=WORKSPACE_PROJECT_NAME)
         room_context.set_current_room(self.id)
         self._ensure_workspace_project()
         context = _workspace_context(self.id, self.path)
@@ -496,10 +604,10 @@ class Room:
             for a resync prompt, rather than silently trusting or
             discarding it.
         """
-        guard.set_project_root(self.path)
+        guard.set_project_roots(self.projects, primary=WORKSPACE_PROJECT_NAME)
         room_context.set_current_room(self.id)
         project_dir = _workspace_project_dir(self.id)
-        old_index, new_index = self._ensure_workspace_project()
+        reconcile_results = self._ensure_workspace_project()
 
         context = _workspace_context(self.id, self.path)
         self.pipeline.context = context
@@ -509,46 +617,67 @@ class Room:
         if cached is None:
             return None, None
 
-        fraction = _change_fraction(old_index, new_index)
+        fraction = _aggregate_change_fraction(reconcile_results)
         if fraction < RESYNC_CHANGE_THRESHOLD:
             return cached.answer, None
 
-        changed, total = _index_diff(old_index, new_index)
+        changed, total = _aggregate_index_diff(reconcile_results)
         return cached.answer, {"changed": changed, "total": total, "fraction": fraction}
 
-    def _ensure_workspace_project(self) -> tuple[ProjectIndex | None, ProjectIndex]:
-        """Attach (idempotent) this room's project into the workspace
-        metadata store, keyed by the room's own id, reconciling its file
-        index synchronously — the source of the "file metadata stays
-        fresh" guarantee every time a room becomes active, whether
-        freshly created, resumed, or re-bootstrapped. Also ensures a
-        background ProjectWatcher is running for it. Returns
-        (index_before_this_reconcile_or_None, index_after) so callers
-        can measure how much changed.
+    def _ensure_workspace_project(self) -> ReconcileResults:
+        """Attach (idempotent) every project in self.projects into the
+        workspace metadata store, keyed by the room's own id, reconciling
+        each one's file index synchronously — the source of the "file
+        metadata stays fresh" guarantee every time a room becomes active,
+        whether freshly created, resumed, or re-bootstrapped. Also
+        ensures a background ProjectWatcher is running for each. Returns
+        {name: (index_before_this_reconcile_or_None, index_after)} so
+        callers can measure how much changed, per project or aggregated
+        (see _aggregate_change_fraction()).
         """
-        project_dir = _workspace_project_dir(self.id)
-        old_index = IndexRepository(project_dir).load()
-
         manager = SessionManager()
         try:
             manager.create(self.id)
         except SessionAlreadyExists:
             pass
-        manager.attach(self.id, self.path, project_name=WORKSPACE_PROJECT_NAME)
 
-        new_index = IndexRepository(project_dir).load()
-        self._ensure_watcher(project_dir, new_index)
-        return old_index, new_index
+        results: ReconcileResults = {}
+        for name, path in self.projects.items():
+            project_dir = _workspace_project_dir(self.id, name)
+            old_index = IndexRepository(project_dir).load()
+            manager.attach(self.id, path, project_name=name)
+            new_index = IndexRepository(project_dir).load()
+            self._ensure_watcher(name, project_dir, new_index, path)
+            results[name] = (old_index, new_index)
+        return results
 
-    def _ensure_watcher(self, project_dir: Path, index: ProjectIndex) -> None:
-        if self.id in ROOM_WATCHERS:
+    def _ensure_watcher(
+        self,
+        project_name: str,
+        project_dir: Path,
+        index: ProjectIndex | None,
+        path: str,
+    ) -> None:
+        if (self.id, project_name) in ROOM_WATCHERS:
             return
-        project_root = Path(self.path).expanduser().resolve()
+        if index is None:
+            # ProjectWatcher assumes a valid, already-reconciled starting
+            # index (see its own docstring) — this should never happen
+            # right after a successful attach()/reconcile, but refusing
+            # here is cheap insurance against ever registering a watcher
+            # that would crash the next stop_all_room_watchers() call.
+            logger.error(
+                "no index available for project %r (room %s) — not starting a watcher",
+                project_name,
+                self.id,
+            )
+            return
+        project_root = Path(path).expanduser().resolve()
         ignore_rules = IgnoreRules(project_root)
-        indexer = ProjectIndexer(WORKSPACE_PROJECT_NAME, project_root, ignore_rules)
+        indexer = ProjectIndexer(project_name, project_root, ignore_rules)
         watcher = ProjectWatcher(indexer, index, IndexRepository(project_dir))
         watcher.start()
-        ROOM_WATCHERS[self.id] = watcher
+        ROOM_WATCHERS[(self.id, project_name)] = watcher
 
     def _cache_synthesis(self, answer: str) -> None:
         """Runs the synthesize stage directly (ProjectPipeline.ask()
@@ -629,18 +758,22 @@ class Room:
                 )
 
     def _ask_blocking(self, question: str) -> str:
-        guard.set_project_root(self.path)
+        guard.set_project_roots(self.projects, primary=WORKSPACE_PROJECT_NAME)
         room_context.set_current_room(self.id)
         with ask_context.asker(self._ask_and_wait):
             return self.pipeline.ask(question)
 
     # ---- the agent's own mid-turn question -------------------------------
 
-    def _ask_and_wait(self, question: str) -> str | None:
+    def _ask_and_wait(
+        self, question: str, options: list[str] | None = None
+    ) -> str | None:
         """Called from the worker thread, inside the `ask` tool."""
         self.awaiting_reply = True
-        self.append_transcript({"type": "question", "text": question})
-        self.broadcast_now(events.QUESTION, {"text": question})
+        self.append_transcript(
+            {"type": "question", "text": question, "options": options}
+        )
+        self.broadcast_now(events.QUESTION, {"text": question, "options": options})
         future = asyncio.run_coroutine_threadsafe(self.broadcast_state(), self.loop)
         future.result()
         return self.reply_queue.get()

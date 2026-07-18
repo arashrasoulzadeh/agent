@@ -103,9 +103,10 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first["room"], second["room"])
 
     async def test_prompt_runs_a_tool_and_answers(self):
-        async with running_server(ToolCallingPipeline) as uri, websockets.connect(
-            uri
-        ) as ws:
+        async with (
+            running_server(ToolCallingPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
@@ -147,9 +148,10 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
                 live_room.turn_active = False
 
     async def test_ask_tool_round_trips_through_question_and_reply(self):
-        async with running_server(AskToolPipeline) as uri, websockets.connect(
-            uri
-        ) as ws:
+        async with (
+            running_server(AskToolPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
@@ -158,6 +160,7 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
 
             question = await recv_until(ws, lambda m: m.get("event") == "question")
             self.assertEqual(question["data"]["text"], "what should I call this?")
+            self.assertIsNone(question["data"]["options"])
 
             await send_request(ws, "/reply", {"text": "Widget"}, room=room_id)
 
@@ -166,6 +169,31 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
                 lambda m: m.get("event") == "answer" and "Widget" in m["data"]["text"],
             )
             self.assertEqual(answer["data"]["text"], "got: Widget")
+
+    async def test_ask_tool_with_options_round_trips_through_question_and_reply(self):
+        async with (
+            running_server(AskToolPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
+            data = await send_request(ws, "/session/create", {"path": "."})
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            await send_request(
+                ws, "/prompt", {"text": "ask-with-options"}, room=room_id
+            )
+
+            question = await recv_until(ws, lambda m: m.get("event") == "question")
+            self.assertEqual(question["data"]["text"], "pick one")
+            self.assertEqual(question["data"]["options"], ["a", "b", "c"])
+
+            await send_request(ws, "/reply", {"text": "b"}, room=room_id)
+
+            answer = await recv_until(
+                ws,
+                lambda m: m.get("event") == "answer" and "got: b" in m["data"]["text"],
+            )
+            self.assertEqual(answer["data"]["text"], "got: b")
 
     async def test_reply_rejected_when_not_awaiting_one(self):
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
@@ -177,9 +205,10 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
                 await send_request(ws, "/reply", {"text": "nope"}, room=room_id)
 
     async def test_startup_failure_reports_a_friendly_error(self):
-        async with running_server(FailingPipeline) as uri, websockets.connect(
-            uri
-        ) as ws:
+        async with (
+            running_server(FailingPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             await send_request(ws, "/session/create", {"path": "/nonexistent"})
             error = await recv_until(ws, lambda m: m.get("event") == "error")
             self.assertIn("bad project path", error["data"]["message"])
@@ -219,9 +248,7 @@ class TestPersistenceAndResume(unittest.IsolatedAsyncioTestCase):
             rooms.ROOMS_DIR.mkdir(parents=True, exist_ok=True)
             (rooms.ROOMS_DIR / f"{room_id}.json").write_text(saved_json)
             async with websockets.connect(uri) as ws2:
-                resumed = await send_request(
-                    ws2, "/session/resume", {"room": room_id}
-                )
+                resumed = await send_request(ws2, "/session/resume", {"room": room_id})
                 self.assertEqual(resumed["id"], room_id)
 
     async def test_prompt_succeeds_after_resuming_a_room_from_disk(self):
@@ -250,12 +277,8 @@ class TestPersistenceAndResume(unittest.IsolatedAsyncioTestCase):
                 await send_request(
                     ws2, "/prompt", {"text": "a follow-up"}, room=room_id
                 )
-                answer = await recv_until(
-                    ws2, lambda m: m.get("event") == "answer"
-                )
-                self.assertEqual(
-                    answer["data"]["text"], "stub answer to: a follow-up"
-                )
+                answer = await recv_until(ws2, lambda m: m.get("event") == "answer")
+                self.assertEqual(answer["data"]["text"], "stub answer to: a follow-up")
 
     async def test_rooms_list_includes_saved_rooms(self):
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
@@ -318,9 +341,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
         (self.base_dir / "rooms" / f"{room_id}.json").unlink()
 
     async def test_bootstrap_populates_index_and_synthesis_cache(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -338,9 +362,7 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-            await wait_until(
-                lambda: SynthesisRepository(cache_dir).load() is not None
-            )
+            await wait_until(lambda: SynthesisRepository(cache_dir).load() is not None)
             synthesis = SynthesisRepository(cache_dir).load()
             self.assertEqual(synthesis.answer, answer["data"]["text"])
             self.assertEqual(synthesis.file_count, 5)
@@ -357,9 +379,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
         A rendered function signature line for one of the fixture files
         would only appear if the full-signature tier had leaked in.
         """
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -373,24 +396,25 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("def f0()", raw)
 
     async def test_second_bootstrap_after_reset_uses_cache_without_llm(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
             room_id = data["room"]
             first_answer = await recv_until(ws, lambda m: m.get("event") == "answer")
             await wait_until(
-                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
-                is not None
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load() is not None
             )
 
         self._drop_room_file(room_id)
 
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -411,17 +435,17 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_suggested_when_project_has_drifted_past_threshold(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
             await wait_until(
-                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
-                is not None
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load() is not None
             )
 
         self._drop_room_file(room_id)
@@ -430,9 +454,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
         (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
         (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
 
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -452,26 +477,27 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_confirm_reruns_analysis_and_updates_cache(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
             await wait_until(
-                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
-                is not None
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load() is not None
             )
 
         self._drop_room_file(room_id)
         (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
         (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
 
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -494,26 +520,27 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(synthesis.file_count, 5)
 
     async def test_resync_declined_leaves_cache_untouched_and_clears_flag(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
             await wait_until(
-                lambda: SynthesisRepository(self._cache_dir(room_id)).load()
-                is not None
+                lambda: SynthesisRepository(self._cache_dir(room_id)).load() is not None
             )
 
         self._drop_room_file(room_id)
         (self.project_dir / "mod0.py").write_text("def f0():\n    return 999\n")
         (self.project_dir / "mod1.py").write_text("def f1():\n    return 999\n")
 
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )
@@ -528,9 +555,10 @@ class TestWorkspaceCacheIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(live_room.pipeline.questions, [])
 
     async def test_resync_rejected_when_none_is_pending(self):
-        async with running_server(
-            StubPipeline, base_dir=self.base_dir
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(StubPipeline, base_dir=self.base_dir) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(
                 ws, "/session/create", {"path": str(self.project_dir)}
             )

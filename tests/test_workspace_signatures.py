@@ -32,7 +32,7 @@ def get_llm(temperature: float = 0, log_raw_io: bool = True) -> str:
         # The function body itself must never appear (only the "returns"
         # annotation key, not the body's `return "x"` statement/value).
         self.assertNotIn('"x"', str(result))
-        self.assertNotIn("return \"x\"", str(result))
+        self.assertNotIn('return "x"', str(result))
 
     def test_async_function_detected(self):
         source = "async def serve() -> None:\n    pass\n"
@@ -40,12 +40,12 @@ def get_llm(temperature: float = 0, log_raw_io: bool = True) -> str:
         self.assertTrue(result["functions"][0]["async"])
 
     def test_function_with_star_args_and_decorators(self):
-        source = '''
+        source = """
 @tool
 @staticmethod
 def run(a, *args, b=1, **kwargs):
     pass
-'''
+"""
         result = extract_python(source)
         fn = result["functions"][0]
         names = [p["name"] for p in fn["params"]]
@@ -98,11 +98,11 @@ class ProjectAnalyst(Base):
         self.assertEqual(result["variables"][0]["value"], "'gpt-4o-mini'")
 
     def test_nested_function_local_variables_not_captured(self):
-        source = '''
+        source = """
 def outer():
     local_var = 1
     return local_var
-'''
+"""
         result = extract_python(source)
         self.assertEqual(result["variables"], [])
         self.assertEqual(len(result["functions"]), 1)
@@ -153,13 +153,13 @@ def f():
         self.assertIsNone(result)
 
     def test_full_source_body_never_present_in_output(self):
-        source = '''
+        source = """
 SECRET_LOOKING_STRING = "not-actually-a-secret-just-body-content"
 
 def process(data):
     transformed = data.upper()
     return transformed
-'''
+"""
         result = extract_python(source)
         blob = str(result)
         self.assertNotIn("transformed", blob)

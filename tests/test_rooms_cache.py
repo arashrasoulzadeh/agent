@@ -8,7 +8,12 @@ import unittest
 
 from models.file_metadata import FileMetadata
 from models.project_index import ProjectIndex
-from service.rooms import _change_fraction, _index_diff
+from service.rooms import (
+    _aggregate_change_fraction,
+    _aggregate_index_diff,
+    _change_fraction,
+    _index_diff,
+)
 
 
 def _index(files: dict[str, str]) -> ProjectIndex:
@@ -95,6 +100,68 @@ class TestChangeFraction(unittest.TestCase):
         old = _index({f"f{i}.py": str(i) for i in range(5)})
         new = _index({f"f{i}.py": f"changed{i}" for i in range(5)})
         self.assertAlmostEqual(_change_fraction(old, new), 1.0)
+
+
+class TestAggregateIndexDiff(unittest.TestCase):
+    def test_sums_across_every_attached_project(self):
+        results = {
+            "project": (_index({"a.py": "1"}), _index({"a.py": "2"})),
+            "backend": (
+                _index({"b.py": "1", "c.py": "2"}),
+                _index({"b.py": "1", "c.py": "2"}),
+            ),
+        }
+        # project: 1 changed of 1; backend: 0 changed of 2.
+        self.assertEqual(_aggregate_index_diff(results), (1, 3))
+
+    def test_single_project_matches_index_diff_exactly(self):
+        old = _index({"a.py": "1", "b.py": "2"})
+        new = _index({"a.py": "1", "b.py": "changed"})
+        results = {"project": (old, new)}
+        self.assertEqual(_aggregate_index_diff(results), _index_diff(old, new))
+
+
+class TestAggregateChangeFraction(unittest.TestCase):
+    def test_any_project_with_no_baseline_forces_fully_changed(self):
+        results = {
+            "project": (_index({"a.py": "1"}), _index({"a.py": "1"})),
+            "backend": (None, _index({"b.py": "1"})),
+        }
+        self.assertEqual(_aggregate_change_fraction(results), 1.0)
+
+    def test_nothing_changed_across_any_project_is_zero(self):
+        results = {
+            "project": (_index({"a.py": "1"}), _index({"a.py": "1"})),
+            "backend": (_index({"b.py": "1"}), _index({"b.py": "1"})),
+        }
+        self.assertEqual(_aggregate_change_fraction(results), 0.0)
+
+    def test_partial_change_averages_across_every_project(self):
+        results = {
+            "project": (
+                _index({f"f{i}.py": str(i) for i in range(5)}),
+                _index(
+                    {
+                        **{f"f{i}.py": str(i) for i in range(4)},
+                        "f4.py": "changed",
+                    }
+                ),
+            ),
+            "backend": (
+                _index({f"g{i}.py": str(i) for i in range(5)}),
+                _index({f"g{i}.py": str(i) for i in range(5)}),
+            ),
+        }
+        # 1 changed of 10 total across both projects.
+        self.assertAlmostEqual(_aggregate_change_fraction(results), 0.1)
+
+    def test_single_project_matches_change_fraction_exactly(self):
+        old = _index({f"f{i}.py": str(i) for i in range(5)})
+        new = _index({f"f{i}.py": f"changed{i}" for i in range(5)})
+        results = {"project": (old, new)}
+        self.assertEqual(
+            _aggregate_change_fraction(results), _change_fraction(old, new)
+        )
 
 
 if __name__ == "__main__":

@@ -28,9 +28,7 @@ class TestStageEventBus(unittest.TestCase):
         bus.stage_completed("a", None)
         bus.stage_failed("b", None, ValueError("x"))
 
-        self.assertEqual(
-            seen, [("started", "a"), ("completed", "a"), ("failed", "b")]
-        )
+        self.assertEqual(seen, [("started", "a"), ("completed", "a"), ("failed", "b")])
 
     def test_unsubscribed_observer_receives_nothing_further(self):
         bus = StageEventBus()
