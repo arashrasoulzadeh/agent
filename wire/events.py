@@ -51,6 +51,17 @@ ERROR = "error"
 # data: {"changed": int, "total": int, "fraction": float}
 RESYNC_SUGGESTED = "resync.suggested"
 
+# The server-driven UI channel: everything the reference TUI client
+# (ui/app.py) actually renders arrives here, as a list of ops built by
+# service/ui_builder.py from a dataclasses.asdict(UIOp) — never as the
+# semantic events above, which stay defined (and still fire) for any
+# other purpose, but aren't what a generic renderer listens to.
+# data: {"ops": [{"op": "replace"|"append"|"remove", "target": str,
+#                 "node": {...} | None}, ...]}
+# See docs/PROTOCOL.md's "UI component protocol" section for the full
+# Node/op schema and how a client interaction maps back via /ui/event.
+UI_UPDATE = "ui.update"
+
 
 async def broadcast(
     clients: set[Transport], room_id: str, name: str, data: dict

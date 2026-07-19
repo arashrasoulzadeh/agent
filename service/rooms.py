@@ -40,6 +40,8 @@ import hashlib
 import logging
 import os
 import queue
+import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -61,6 +63,8 @@ from llm import get_llm
 from models.context import ProjectContext
 from models.project_index import ProjectIndex
 from models.project_synthesis import ProjectSynthesis
+from models.ui import Node, UIOp
+from service import ui_builder
 from service.room_repository import RoomRepository
 from tool import AGENT_TOOLS, metadata
 from wire import events
@@ -279,11 +283,15 @@ class RoomSink:
     def tool_call(self, name: str, args: str) -> None:
         self.room.active_tool = name
         self.room.broadcast_now(events.TOOL_CALL, {"name": name, "args": args})
+        self.room.broadcast_ui_now(
+            self.room._content_ops("tool_call", name=name, args=args)
+        )
         self.room.append_transcript({"type": "tool_call", "name": name, "args": args})
 
     def tool_result(self, text: str) -> None:
         self.room.active_tool = None
         self.room.broadcast_now(events.TOOL_RESULT, {"output": text})
+        self.room.broadcast_ui_now(self.room._content_ops("tool_result", output=text))
         self.room.append_transcript({"type": "tool_result", "output": text})
 
     def tokens(self, prompt: int, completion: int, total: int) -> None:
@@ -291,6 +299,7 @@ class RoomSink:
         self.room.tokens["completion"] = completion
         self.room.tokens["total"] += total or (prompt + completion)
         self.room.broadcast_now(events.TOKENS, dict(self.room.tokens))
+        self.room.broadcast_ui_now(self.room._state_ops())
         self.room.save()
 
 
@@ -319,6 +328,11 @@ class Room:
         self.updated_at = self.created_at
         self.transcript: list[dict[str, Any]] = []
         self.reply_queue: queue.Queue[str] = queue.Queue()
+        # The agent's currently pending ask() options, if any — set in
+        # _ask_and_wait, read by wire/routes.py's /ui/event to resolve
+        # an "opt-N" click back to the option text it stands for. None
+        # whenever no question with buttons is outstanding.
+        self.pending_options: list[str] | None = None
 
         # Fresh each time, reading whatever ROOMS_DIR currently is — this
         # is what lets tests/stubs.py's `rooms.ROOMS_DIR = tmp_dir`
@@ -448,6 +462,7 @@ class Room:
         agent's loop; this is this module's equivalent of Textual's
         `call_from_thread` — hop onto the event loop, wait for the send.
         """
+        print("SOCKET => ", name, data)
         future = asyncio.run_coroutine_threadsafe(
             events.broadcast(self.clients, self.id, name, data), self.loop
         )
@@ -458,6 +473,75 @@ class Room:
 
     async def broadcast_state(self) -> None:
         await self._emit(events.SESSION_STATE, self.state_snapshot())
+        await self._emit_ui(self._state_ops())
+
+    # ---- server-driven UI ----------------------------------------------
+    #
+    # Everything the reference TUI client actually renders arrives as
+    # `ui.update` ops built by service/ui_builder.py — the semantic
+    # events above (session.state, message, tool.call, ...) still fire
+    # for any other purpose, but the client only listens to this channel.
+
+    def _state_ops(self) -> list[UIOp]:
+        """The header/footer replace ops every state-affecting action
+        sends alongside its own specific ops (a content append, a modal
+        replace). Safe — cheap, even — to send unconditionally: the
+        client updates an already-mounted widget's props in place
+        rather than remounting it, so resending unchanged header/footer
+        props never disrupts in-progress typing in footer-input."""
+        model = os.getenv("GAPGPT_MODEL", "gpt-4o-mini")
+        base_url = os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1")
+        header = ui_builder.header_node(
+            model,
+            base_url,
+            TOOL_NAMES,
+            self.active_tool,
+            self.tokens,
+            self.status_label,
+        )
+        footer_info = ui_builder.footer_info_node(
+            self.path, self.project_list(), self.id
+        )
+        footer_input = ui_builder.footer_input_node(
+            self.awaiting_reply, self.resync_suggested
+        )
+        return [
+            UIOp(op="replace", target="header", node=header),
+            UIOp(op="replace", target="footer-info", node=footer_info),
+            UIOp(op="replace", target="footer-input", node=footer_input),
+        ]
+
+    async def _emit_ui(self, ops: list[UIOp]) -> None:
+        await self._emit(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})
+
+    def broadcast_ui_now(self, ops: list[UIOp]) -> None:
+        """broadcast_now()'s counterpart for UI ops — called from the
+        worker thread (RoomSink's tool_call/tool_result/tokens, and
+        _ask_and_wait, all run there)."""
+        self.broadcast_now(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})
+
+    def _content_node(self, kind: str, **fields: Any) -> Node:
+        return ui_builder.content_entry_node(kind, uuid.uuid4().hex, **fields)
+
+    def _content_ops(self, kind: str, **fields: Any) -> list[UIOp]:
+        """One append op for a new content entry, plus the same
+        header/footer refresh every state-affecting action sends —
+        shared by the async path (append_content, below) and the
+        worker-thread-safe sync path (RoomSink's tool_call/tool_result)."""
+        node = self._content_node(kind, **fields)
+        return [UIOp(op="append", target="content", node=node)] + self._state_ops()
+
+    async def append_content(self, kind: str, **fields: Any) -> None:
+        """Appends one transcript-kind entry to the content log and
+        refreshes header/footer alongside it — the async counterpart to
+        RoomSink's synchronous worker-thread appends below."""
+        await self._emit_ui(self._content_ops(kind, **fields))
+
+    async def push_modal(self, node: Node) -> None:
+        await self._emit_ui([UIOp(op="replace", target="modal", node=node)])
+
+    async def dismiss_modal(self) -> None:
+        await self._emit_ui([UIOp(op="remove", target="modal")])
 
     # ---- turns ------------------------------------------------------------
     #
@@ -710,9 +794,11 @@ class Room:
         """
         self.append_transcript({"type": "answer", "text": answer})
         await self._emit(events.ANSWER, {"text": answer})
+        await self.append_content("answer", text=answer)
         if resync_info is not None:
             self.append_transcript({"type": "resync_suggested", **resync_info})
             await self._emit(events.RESYNC_SUGGESTED, resync_info)
+            await self.append_content("resync_suggested", **resync_info)
         self.turn_active = False
         self.status_label = None
         self.active_tool = None
@@ -725,6 +811,7 @@ class Room:
         await self.broadcast_state()
         self.append_transcript({"type": "message", "role": "user", "text": text})
         await self._emit(events.MESSAGE, {"role": "user", "text": text})
+        await self.append_content("message", text=text, role="user")
         await self._run_turn(text)
 
     async def _run_turn(self, question: str, cache_after: bool = False) -> None:
@@ -732,10 +819,13 @@ class Room:
         try:
             answer = await asyncio.to_thread(self._ask_blocking, question)
         except Exception as exc:
-            await self._emit(events.ERROR, {"message": friendly(exc)})
+            message = friendly(exc)
+            await self._emit(events.ERROR, {"message": message})
+            await self.append_content("error", message=message)
         else:
             self.append_transcript({"type": "answer", "text": answer})
             await self._emit(events.ANSWER, {"text": answer})
+            await self.append_content("answer", text=answer)
         finally:
             self.turn_active = False
             self.status_label = None
@@ -770,17 +860,26 @@ class Room:
     ) -> str | None:
         """Called from the worker thread, inside the `ask` tool."""
         self.awaiting_reply = True
+        self.pending_options = options
         self.append_transcript(
             {"type": "question", "text": question, "options": options}
         )
         self.broadcast_now(events.QUESTION, {"text": question, "options": options})
+        ops = self._content_ops("question", text=question)
+        modal_node = ui_builder.question_modal_node(question, options)
+        if modal_node is not None:
+            ops.append(UIOp(op="replace", target="modal", node=modal_node))
+        self.broadcast_ui_now(ops)
         future = asyncio.run_coroutine_threadsafe(self.broadcast_state(), self.loop)
         future.result()
         return self.reply_queue.get()
 
     async def deliver_reply(self, text: str) -> None:
         """Assumes try_consume_reply() already succeeded."""
+        self.pending_options = None
         self.append_transcript({"type": "message", "role": "user", "text": text})
         await self._emit(events.MESSAGE, {"role": "user", "text": text})
+        await self.dismiss_modal()
+        await self.append_content("message", text=text, role="user")
         await self.broadcast_state()
         self.reply_queue.put(text)

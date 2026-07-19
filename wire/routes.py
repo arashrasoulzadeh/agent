@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from core import settings
-from service import rooms
+from service import rooms, ui_builder
 from service.rooms import CannotRemovePrimaryProject
 from wire.protocol import ProtocolError
 from wire.transport.base import Transport
@@ -169,6 +169,152 @@ async def settings_update(transport: Transport, data: dict) -> dict:
     return {"settings": settings.list_settings()}
 
 
+_COMMANDS = {"/add", "/remove", "/projects", "/settings"}
+
+
+def _parse_command(value: str) -> tuple[str, list[str]] | None:
+    """Recognizes only `/add`, `/remove`, `/projects`, `/settings` —
+    anything else (ordinary chat text, a bare "y"/"n" resync reply, an
+    unrelated slash-prefixed typo) returns None and falls through to
+    being sent as an ordinary prompt. Moved here from ui/app.py: which
+    command a submitted line means is now a server decision, matching
+    every other interaction with the server-driven UI."""
+    if not value.startswith("/"):
+        return None
+    parts = value.split()
+    command = parts[0]
+    if command not in _COMMANDS:
+        return None
+    return command, parts[1:]
+
+
+async def ui_event(transport: Transport, data: dict) -> dict:
+    """The one route every interaction with the server-driven UI goes
+    through: a click, an Enter submit, a list selection. Dispatches by
+    `component_id`, reusing the other routes' own logic (reply, resync,
+    project_add, project_remove, settings_update) directly rather than
+    duplicating it — see docs/PROTOCOL.md's "UI component protocol"
+    section for the full id-naming convention this relies on.
+
+    "exit"/"quit"/"q" are deliberately not handled here — whether to
+    terminate the client process isn't room state, so the reference
+    client (ui/app.py) intercepts those words itself before ever
+    sending a footer-input submit for them. A hypothetical other client
+    that sent one anyway would just have it treated as prompt text,
+    which is a safe (if unhelpful) fallback, not a crash.
+    """
+    room = _require_room(data)
+    component_id = data.get("component_id")
+    event = data.get("event")
+    if not component_id or not event:
+        raise ProtocolError("/ui/event needs 'component_id' and 'event'")
+    value = data.get("value") or ""
+
+    if component_id == "footer-input" and event == "submit":
+        await _dispatch_footer_submit(transport, room, value)
+        return {"accepted": True}
+
+    if component_id.startswith("opt-") and event == "click":
+        await _dispatch_option_click(transport, room, component_id)
+        return {"accepted": True}
+
+    if component_id.startswith("setting-") and event == "submit":
+        await _dispatch_setting_submit(transport, room, component_id, value)
+        return {"accepted": True}
+
+    raise ProtocolError(f"unknown component: {component_id!r}")
+
+
+async def _dispatch_footer_submit(
+    transport: Transport, room: "rooms.Room", value: str
+) -> None:
+    value = value.strip()
+
+    if room.awaiting_reply:
+        await reply(transport, {"room": room.id, "text": value})
+        return
+
+    if room.resync_suggested:
+        confirm = value.lower() in ("y", "yes")
+        await resync(transport, {"room": room.id, "confirm": confirm})
+        return
+
+    parsed = _parse_command(value)
+    if parsed is not None:
+        command, args = parsed
+        await _dispatch_command(transport, room, command, args)
+        return
+
+    if room.turn_active or not value:
+        return
+
+    await prompt(transport, {"room": room.id, "text": value})
+
+
+async def _dispatch_command(
+    transport: Transport, room: "rooms.Room", command: str, args: list[str]
+) -> None:
+    if command == "/projects":
+        await room.append_content("info", text=_projects_info_text(room))
+        return
+    if command == "/add":
+        if not args:
+            await room.append_content("info", text="Usage: /add <path> [name]")
+            return
+        req_data: dict[str, str] = {"path": args[0]}
+        if len(args) > 1:
+            req_data["name"] = args[1]
+        await project_add(transport, {"room": room.id, **req_data})
+        return
+    if command == "/remove":
+        if not args:
+            await room.append_content("info", text="Usage: /remove <name>")
+            return
+        await project_remove(transport, {"room": room.id, "name": args[0]})
+        return
+    if command == "/settings":
+        await room.push_modal(ui_builder.settings_modal_node(settings.list_settings()))
+        return
+
+
+def _projects_info_text(room: "rooms.Room") -> str:
+    projects = room.project_list()
+    if not projects:
+        return "No projects attached."
+    lines = ["Attached projects:"]
+    for p in sorted(projects, key=lambda p: p["name"]):
+        marker = "primary" if p.get("primary") else "secondary"
+        lines.append(f"  {p['name']} ({marker})  {p['path']}")
+    return "\n".join(lines)
+
+
+async def _dispatch_option_click(
+    transport: Transport, room: "rooms.Room", component_id: str
+) -> None:
+    if not room.awaiting_reply or room.pending_options is None:
+        raise ProtocolError("no question is currently pending a click reply")
+    try:
+        index = int(component_id.removeprefix("opt-"))
+        value = room.pending_options[index]
+    except (ValueError, IndexError) as exc:
+        raise ProtocolError(f"unknown option: {component_id!r}") from exc
+    await reply(transport, {"room": room.id, "text": value})
+
+
+async def _dispatch_setting_submit(
+    transport: Transport, room: "rooms.Room", component_id: str, value: str
+) -> None:
+    key = component_id.removeprefix("setting-")
+    spec = settings.get_spec(key)
+    if spec is None:
+        raise ProtocolError(f"unknown setting: {key!r}")
+    if spec.secret and not value:
+        return  # untouched — never overwrite a secret with blank
+    result = await settings_update(transport, {"key": key, "value": value})
+    await room.push_modal(ui_builder.settings_modal_node(result["settings"]))
+    await room.append_content("info", text=f"Saved {spec.label}.")
+
+
 async def rooms_list(transport: Transport, data: dict) -> dict:
     return {"rooms": rooms.Room.list_saved()}
 
@@ -196,5 +342,6 @@ ROUTES: dict[str, Any] = {
     "/project/list": project_list,
     "/settings/list": settings_list,
     "/settings/update": settings_update,
+    "/ui/event": ui_event,
     "/rooms/list": rooms_list,
 }

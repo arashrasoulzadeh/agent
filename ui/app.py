@@ -16,6 +16,7 @@ scrolling internally.
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -386,7 +387,18 @@ class AgentApp(App):
             async for raw in self.ws:
                 if not self.is_running:
                     return
-                self._handle(json.loads(raw))
+                try:
+                    self._handle(json.loads(raw))
+                except Exception:
+                    # An unhandled exception here would otherwise kill this
+                    # background task silently (nothing awaits it) — the
+                    # connection looks alive but no further event ever gets
+                    # processed again. Logging and continuing means one bad
+                    # message can't take the rest of the session down with
+                    # it, matching wire/app.py's own per-request isolation.
+                    logging.getLogger("ui.app").exception(
+                        "failed to handle an incoming message"
+                    )
         except websockets.ConnectionClosed:
             self._fatal("Lost connection to the agent server.")
 

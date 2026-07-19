@@ -58,6 +58,15 @@ SETTINGS: list[SettingSpec] = [
 _BY_KEY = {spec.key: spec for spec in SETTINGS}
 
 
+def get_spec(key: str) -> SettingSpec | None:
+    """The SettingSpec for `key`, or None if it isn't one of SETTINGS —
+    the public lookup callers outside this module use (wire/routes.py's
+    /ui/event dispatch needs a setting's `secret`/`label` to decide
+    whether a blank submit is a no-op) instead of reaching into _BY_KEY
+    directly."""
+    return _BY_KEY.get(key)
+
+
 def _mask(value: str) -> str:
     return "•" * min(len(value), 8) if value else ""
 
