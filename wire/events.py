@@ -63,6 +63,22 @@ RESYNC_SUGGESTED = "resync.suggested"
 UI_UPDATE = "ui.update"
 
 
+def _log_ui_update(room_id: str, data: dict) -> None:
+    """One compact line per op crossing the transport — op/target/node
+    type+id, never the node's full props/children, so a header replace
+    (sent on every state change) doesn't flood the log with its whole
+    tree. This is the only place ui.update traffic is logged; a generic
+    renderer client has no other way to see what it was told to draw
+    without opening devtools-equivalent tooling this project doesn't
+    have, so this is that visibility, server-side."""
+    summary = []
+    for op in data.get("ops", []):
+        node = op.get("node")
+        node_desc = f"{node['type']}:{node['id']}" if node else "-"
+        summary.append(f"{op['op']}({op['target']}<-{node_desc})")
+    logger.debug("ui.update room=%s %s", room_id, " ".join(summary))
+
+
 async def broadcast(
     clients: set[Transport], room_id: str, name: str, data: dict
 ) -> None:
@@ -76,6 +92,8 @@ async def broadcast(
     """
     if not clients:
         return
+    if name == UI_UPDATE:
+        _log_ui_update(room_id, data)
     payload = protocol.event(name, room_id, data)
     dead = set()
     for client in list(clients):

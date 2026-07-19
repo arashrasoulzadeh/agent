@@ -1,21 +1,34 @@
 """Headless tests for the AgentApp TUI client.
 
-AgentApp is a thin WebSocket client (see ui/app.py) — these tests run a
-real server (tests/stubs.py's running_server) with a stubbed pipeline and
-point a real AgentApp at it, exercising the actual wire protocol end to
-end. Nothing here touches the network or spends a real API token.
+AgentApp is a generic server-driven UI renderer (see ui/app.py) — these
+tests run a real server (tests/stubs.py's running_server) with a stubbed
+pipeline and point a real AgentApp at it, exercising the actual wire
+protocol end to end: the server's ui.update ops, applied by AgentApp's
+own apply_ops, land in real mounted Textual widgets that these tests
+inspect. Nothing here touches the network or spends a real API token.
+
+AgentApp has no room-state attributes of its own anymore (no
+`turn_active`/`awaiting_reply`/`projects` — that's server state, not
+client state) — tests read the same signals a user would see instead:
+whether `#header-status` is currently mounted (a turn is running),
+`#footer-input`'s placeholder ("Your answer…" / "y/n" means the server
+is waiting on this input for something other than a fresh prompt), and
+the rendered content/footer text.
 """
 
 import asyncio
+import io
 import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+from rich.console import Console
 from textual.widgets import Button, Input, OptionList, Static
 
 from core import settings
+from service.ui_builder import COMMANDS
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
@@ -24,13 +37,7 @@ from tests.stubs import (
     ToolCallingPipeline,
     running_server,
 )
-from ui.app import (
-    _COMMAND_HELP,
-    AgentApp,
-    QuestionModal,
-    SettingsModal,
-    _parse_command,
-)
+from ui.app import AgentApp
 
 
 async def wait_until(predicate, timeout: float = 5.0, interval: float = 0.02) -> None:
@@ -39,15 +46,60 @@ async def wait_until(predicate, timeout: float = 5.0, interval: float = 0.02) ->
             await asyncio.sleep(interval)
 
 
+async def wait_for_tree(app: AgentApp) -> None:
+    """The root tree only exists once /session/create or
+    /session/resume's response has been mounted — before that,
+    app._widgets is empty and querying any node id raises."""
+    await wait_until(lambda: "footer-input" in app._widgets)
+
+
+async def wait_idle(app: AgentApp) -> None:
+    """The server-side proxy for "no turn is running": a running turn
+    always carries a status_label, which is the only thing that ever
+    mounts #header-status (see service/ui_builder.py's header_node)."""
+    await wait_for_tree(app)
+    await wait_until(lambda: "header-status" not in app._widgets)
+
+
+def _static_renderable(widget: Static):
+    # Static has no public renderable-string accessor; the content it
+    # was last update()'d (or constructed) with is stashed under this
+    # name-mangled attribute.
+    return widget._Static__content
+
+
+def _plain(renderable) -> str:
+    """Flattens any Rich renderable (Text, Panel, Markdown, ...) to
+    plain text via a real Console render, rather than relying on each
+    renderable's own internals."""
+    buf = io.StringIO()
+    Console(file=buf, width=200).print(renderable)
+    return buf.getvalue()
+
+
 def log_text(app: AgentApp) -> str:
-    content = app.query_one("#content")
-    return "\n".join(strip.text for strip in content.lines)
+    content = app._widgets["content"]
+    return "\n".join(
+        _plain(_static_renderable(child))
+        for child in content.children
+        if isinstance(child, Static)
+    )
 
 
 def footer_info_text(app: AgentApp) -> str:
-    # Static has no public renderable-string accessor; the content it was
-    # last update()'d with is stashed under this name-mangled attribute.
-    return app.query_one("#footer-info", Static)._Static__content
+    return _plain(_static_renderable(app._widgets["footer-info"]))
+
+
+def footer_placeholder(app: AgentApp) -> str:
+    return app._widgets["footer-input"].placeholder
+
+
+def modal_visible(app: AgentApp) -> bool:
+    return "modal" in app._widgets and app._modal_slot.display
+
+
+def connection_status_text(app: AgentApp) -> str:
+    return _plain(_static_renderable(app._widgets["connection-status"]))
 
 
 class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
@@ -58,7 +110,7 @@ class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 await pilot.pause(0.1)
                 header = app.query_one("#header").region
                 content = app.query_one("#content").region
@@ -71,7 +123,7 @@ class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 await pilot.resize_terminal(120, 60)
                 await pilot.pause(0.1)
                 header = app.query_one("#header").region
@@ -84,19 +136,19 @@ class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
         async with running_server(SlowPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 30)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 await pilot.pause(0.1)
                 idle_height = app.query_one("#header").region.height
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"hello")
                 await pilot.press("enter")
-                await wait_until(lambda: app.turn_active)
+                await wait_until(lambda: "header-status" in app._widgets)
                 self.assertEqual(
                     app.query_one("#header").region.height, idle_height + 1
                 )
 
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 await pilot.pause(0.05)
                 self.assertEqual(app.query_one("#header").region.height, idle_height)
 
@@ -104,6 +156,7 @@ class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 30)):
+                await wait_for_tree(app)
                 self.assertEqual(app.query_one("#footer-input").styles.background.a, 0)
 
 
@@ -112,93 +165,98 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, "/some/project")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 self.assertIn("clear overview", log_text(app))
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"hello there")
                 await pilot.press("enter")
                 await wait_until(lambda: "hello there" in log_text(app))
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 self.assertIn("stub answer to: hello there", log_text(app))
 
     async def test_ask_tool_round_trips_through_question_and_reply(self):
         async with running_server(AskToolPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"ask-me")
                 await pilot.press("enter")
-                await wait_until(lambda: app.awaiting_reply)
+                await wait_until(lambda: footer_placeholder(app) == "Your answer…")
                 self.assertIn("what should I call this?", log_text(app))
 
                 await pilot.press(*"Widget")
                 await pilot.press("enter")
-                await wait_until(lambda: not app.awaiting_reply and not app.turn_active)
+                await wait_until(
+                    lambda: footer_placeholder(app) != "Your answer…"
+                    and "header-status" not in app._widgets
+                )
                 self.assertIn("got: Widget", log_text(app))
 
     async def test_ask_tool_with_options_shows_modal_and_click_replies(self):
         async with running_server(AskToolPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"ask-with-options")
                 await pilot.press("enter")
-                await wait_until(lambda: app.awaiting_reply)
-                await wait_until(lambda: isinstance(app.screen, QuestionModal))
+                await wait_until(lambda: modal_visible(app))
                 self.assertIn("pick one", log_text(app))
-                # app.query() only searches the base screen — a pushed
-                # modal's widgets live on app.screen (the top of the
-                # screen stack) instead.
                 self.assertEqual(
-                    [b.label.plain for b in app.screen.query(Button)],
+                    [b.label.plain for b in app._widgets["modal"].query(Button)],
                     ["a", "b", "c"],
                 )
 
                 await pilot.click("#opt-1")  # "b"
-                await wait_until(lambda: not app.awaiting_reply and not app.turn_active)
+                await wait_until(
+                    lambda: not modal_visible(app)
+                    and "header-status" not in app._widgets
+                )
                 self.assertIn("got: b", log_text(app))
 
     async def test_question_modal_escape_falls_back_to_free_text(self):
         async with running_server(AskToolPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"ask-with-options")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, QuestionModal))
+                await wait_until(lambda: modal_visible(app))
 
                 await pilot.press("escape")
-                await wait_until(lambda: not isinstance(app.screen, QuestionModal))
-                self.assertTrue(app.awaiting_reply)  # still pending, free text works
+                await wait_until(lambda: not modal_visible(app))
+                # Still pending server-side (Escape never told the server
+                # anything) — free text is still a valid way to answer.
+                self.assertEqual(footer_placeholder(app), "Your answer…")
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"c")
                 await pilot.press("enter")
-                await wait_until(lambda: not app.awaiting_reply and not app.turn_active)
+                await wait_until(
+                    lambda: footer_placeholder(app) != "Your answer…"
+                    and "header-status" not in app._widgets
+                )
                 self.assertIn("got: c", log_text(app))
 
     async def test_tool_call_and_result_land_in_the_transcript(self):
         # The stub resolves near instantly, so this checks the durable
         # outcome (the trace + answer landed in the log) rather than
-        # racing to observe the transient active_tool="cat" state.
+        # racing to observe the transient active-tool state.
         async with running_server(ToolCallingPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"use-tool")
                 await pilot.press("enter")
-                await wait_until(
-                    lambda: not app.turn_active and app.active_tool is None
-                )
+                await wait_idle(app)
 
                 text = log_text(app)
                 self.assertIn("cat", text)
@@ -210,45 +268,10 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
         async with running_server(FailingPipeline) as uri:
             app = AgentApp(uri, "/nonexistent")
             async with app.run_test(size=(100, 40)) as pilot:
+                await wait_for_tree(app)
                 await wait_until(lambda: "bad project path" in log_text(app))
                 await pilot.pause(0.05)
                 self.assertTrue(app.is_running)
-
-
-class TestParseCommand(unittest.TestCase):
-    def test_recognizes_add(self):
-        self.assertEqual(_parse_command("/add ../backend"), ("/add", ["../backend"]))
-
-    def test_recognizes_add_with_name(self):
-        self.assertEqual(
-            _parse_command("/add ../backend backend"),
-            ("/add", ["../backend", "backend"]),
-        )
-
-    def test_recognizes_remove(self):
-        self.assertEqual(_parse_command("/remove backend"), ("/remove", ["backend"]))
-
-    def test_recognizes_projects_with_no_args(self):
-        self.assertEqual(_parse_command("/projects"), ("/projects", []))
-
-    def test_recognizes_settings_with_no_args(self):
-        self.assertEqual(_parse_command("/settings"), ("/settings", []))
-
-    def test_plain_text_is_not_a_command(self):
-        self.assertIsNone(_parse_command("hello there"))
-
-    def test_bare_y_is_never_a_command(self):
-        # Must never be misparsed while a resync confirmation is pending.
-        self.assertIsNone(_parse_command("y"))
-
-    def test_bare_n_is_never_a_command(self):
-        self.assertIsNone(_parse_command("n"))
-
-    def test_unrecognized_slash_command_is_not_a_command(self):
-        self.assertIsNone(_parse_command("/help"))
-
-    def test_empty_string_is_not_a_command(self):
-        self.assertIsNone(_parse_command(""))
 
 
 class TestAgentAppProjectCommands(unittest.IsolatedAsyncioTestCase):
@@ -268,68 +291,55 @@ class TestAgentAppProjectCommands(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.primary_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*f"/add {self.backend_dir} backend")
                 await pilot.press("enter")
 
-                await wait_until(
-                    lambda: any(p["name"] == "backend" for p in app.projects)
-                )
-                await wait_until(lambda: not app.turn_active)
+                await wait_until(lambda: "backend" in footer_info_text(app))
+                await wait_idle(app)
                 self.assertIn("projects backend", footer_info_text(app))
 
     async def test_remove_command_detaches_project(self):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.primary_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*f"/add {self.backend_dir} backend")
                 await pilot.press("enter")
-                await wait_until(
-                    lambda: any(p["name"] == "backend" for p in app.projects)
-                )
-                await wait_until(lambda: not app.turn_active)
+                await wait_until(lambda: "backend" in footer_info_text(app))
+                await wait_idle(app)
 
                 await pilot.press(*"/remove backend")
                 await pilot.press("enter")
-                await wait_until(
-                    lambda: all(p["name"] != "backend" for p in app.projects)
-                )
-                await wait_until(lambda: not app.turn_active)
-                self.assertNotIn("backend", footer_info_text(app))
+                await wait_until(lambda: "backend" not in footer_info_text(app))
+                await wait_idle(app)
 
-    async def test_projects_command_renders_locally_without_a_request(self):
+    async def test_projects_command_round_trips_and_shows_attached_projects(self):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.primary_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/projects")
                 await pilot.press("enter")
                 await wait_until(lambda: "Attached projects" in log_text(app))
-
-                # No request was ever sent for this command — nothing left
-                # pending, and the turn state never toggled.
-                self.assertEqual(app._pending, {})
-                self.assertFalse(app.turn_active)
                 self.assertIn("project (primary)", log_text(app))
 
-    async def test_add_usage_shown_locally_when_path_missing(self):
+    async def test_add_usage_shown_when_path_missing(self):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.primary_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/add")
                 await pilot.press("enter")
                 await wait_until(lambda: "Usage: /add" in log_text(app))
-                self.assertEqual(app._pending, {})
 
 
 class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
@@ -367,14 +377,14 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                inputs = app.screen.query(Input)
+                inputs = app._widgets["modal"].query(Input)
                 self.assertEqual(
                     {i.id for i in inputs},
                     {f"setting-{spec.key}" for spec in settings.SETTINGS},
@@ -384,14 +394,14 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                model_input = app.screen.query_one("#setting-GAPGPT_MODEL", Input)
+                model_input = app.query_one("#setting-GAPGPT_MODEL", Input)
                 self.assertEqual(model_input.value, "gpt-4o-mini")
 
     async def test_secret_field_starts_blank_even_when_set(self):
@@ -399,14 +409,14 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                notion_input = app.screen.query_one("#setting-NOTION_API_KEY", Input)
+                notion_input = app.query_one("#setting-NOTION_API_KEY", Input)
                 self.assertEqual(notion_input.value, "")
                 self.assertTrue(notion_input.password)
 
@@ -414,16 +424,16 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
                 # AGENT_VERBOSE has no default, so its Input starts empty —
                 # no need to clear existing text before typing.
-                app.screen.query_one("#setting-AGENT_VERBOSE", Input).focus()
+                app.query_one("#setting-AGENT_VERBOSE", Input).focus()
                 await pilot.press(*"1")
                 await pilot.press("enter")
 
@@ -434,18 +444,17 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                app.screen.query_one("#setting-GAPGPT_API_KEY", Input).focus()
+                app.query_one("#setting-GAPGPT_API_KEY", Input).focus()
                 await pilot.press("enter")
                 await pilot.pause(0.1)
 
-                self.assertEqual(app._pending, {})
                 self.assertNotIn("Saved", log_text(app))
                 self.assertFalse(settings.SETTINGS_FILE.exists())
 
@@ -453,72 +462,77 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                key_input = app.screen.query_one("#setting-NOTION_API_KEY", Input)
+                key_input = app.query_one("#setting-NOTION_API_KEY", Input)
                 key_input.focus()
                 await pilot.press(*"sk-typed-secret")
                 await pilot.press("enter")
 
+                # Cleared immediately, client-side, on submit — before any
+                # server round trip (see ui/app.py's on_input_submitted).
+                self.assertEqual(key_input.value, "")
                 await wait_until(lambda: "Saved" in log_text(app))
                 self.assertEqual(os.environ.get("NOTION_API_KEY"), "sk-typed-secret")
-                self.assertEqual(key_input.value, "")
 
     async def test_escape_closes_the_modal(self):
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
                 await pilot.press("escape")
-                await wait_until(lambda: not isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: not modal_visible(app))
 
     async def test_settings_field_submit_never_reaches_prompt_handling(self):
-        # A settings Input's Submitted event must be stopped before it
-        # bubbles to AgentApp's own on_input_submitted — otherwise the
-        # exact same keystroke would also be treated as chat text (or a
-        # resync/reply answer), sent as a stray /prompt.
+        # A setting field's submit is dispatched by its own component_id
+        # prefix (see on_input_submitted) — structurally distinct from
+        # footer-input's chat/command path, so the exact same keystroke
+        # can never be misread as a stray /prompt.
         async with running_server(StubPipeline, base_dir=self.base_dir) as uri:
             app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"/settings")
                 await pilot.press("enter")
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
-                app.screen.query_one("#setting-AGENT_VERBOSE", Input).focus()
+                app.query_one("#setting-AGENT_VERBOSE", Input).focus()
                 await pilot.press(*"SETTINGVALUE123")
                 await pilot.press("enter")
 
                 await wait_until(lambda: "Saved" in log_text(app))
                 await pilot.pause(0.1)
                 self.assertNotIn("stub answer to: SETTINGVALUE123", log_text(app))
-                self.assertFalse(app.turn_active)
+                self.assertNotIn("header-status", app._widgets)
 
 
 class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
     """The '/' command popup (see AgentApp._update_command_popup):
     shown while the footer input's first token is an ambiguous or
     incomplete command prefix, navigable with the keyboard or mouse,
-    and never confused with a real chat message or command submission."""
+    and never confused with a real chat message or command submission.
+    Its data comes from service/ui_builder.py's COMMANDS, sent once as
+    part of the initial tree — COMMANDS is imported directly here as
+    the source of truth for what should be listed."""
 
     async def test_shows_every_command_on_bare_slash(self):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
                 self.assertFalse(popup.display)
@@ -529,14 +543,14 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 ids = [
                     popup.get_option_at_index(i).id for i in range(popup.option_count)
                 ]
-                self.assertEqual(ids, [c[0] for c in _COMMAND_HELP])
+                self.assertEqual(ids, [c[0] for c in COMMANDS])
                 self.assertEqual(popup.highlighted, 0)
 
     async def test_filters_to_matching_prefix(self):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -550,7 +564,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -562,7 +576,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -574,7 +588,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -586,7 +600,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -606,7 +620,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -623,7 +637,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
 
                 await pilot.press(*"/s")
@@ -634,15 +648,14 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     app.query_one("#footer-input", Input).value, "/settings "
                 )
-                self.assertFalse(app.turn_active)
-                self.assertEqual(app._pending, {})
                 self.assertFalse(app.query_one("#command-popup", OptionList).display)
+                self.assertFalse(modal_visible(app))
 
     async def test_second_enter_after_accepting_submits_the_command(self):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
 
                 await pilot.press(*"/s")
@@ -650,13 +663,13 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")  # accept -> "/settings "
                 await pilot.pause(0.05)
                 await pilot.press("enter")  # submit
-                await wait_until(lambda: isinstance(app.screen, SettingsModal))
+                await wait_until(lambda: modal_visible(app))
 
     async def test_click_selects_and_fills_the_input(self):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 popup = app.query_one("#command-popup", OptionList)
 
@@ -675,11 +688,11 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(AskToolPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
                 await pilot.press(*"ask-me")
                 await pilot.press("enter")
-                await wait_until(lambda: app.awaiting_reply)
+                await wait_until(lambda: footer_placeholder(app) == "Your answer…")
 
                 await pilot.press("/")
                 await pilot.pause(0.05)
@@ -692,7 +705,10 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("backspace")
                 await pilot.press(*"done")
                 await pilot.press("enter")
-                await wait_until(lambda: not app.awaiting_reply and not app.turn_active)
+                await wait_until(
+                    lambda: footer_placeholder(app) != "Your answer…"
+                    and "header-status" not in app._widgets
+                )
 
     async def test_unmatched_slash_text_still_falls_through_to_a_prompt(self):
         # Regression guard: _accept_command_popup must return False (and
@@ -702,12 +718,35 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 40)) as pilot:
-                await wait_until(lambda: not app.turn_active)
+                await wait_idle(app)
                 app.query_one("#footer-input", Input).focus()
 
                 await pilot.press(*"/xyz")
                 await pilot.press("enter")
                 await wait_until(lambda: "stub answer to: /xyz" in log_text(app))
+
+
+class TestConnectionStatus(unittest.IsolatedAsyncioTestCase):
+    """Connection status is the one thing the server can never tell the
+    client (a disconnected client can't be told anything) — rendered
+    entirely client-side into the reserved #connection-status node."""
+
+    async def test_shows_connected_once_the_session_is_up(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)):
+                await wait_idle(app)
+                self.assertIn("connected", connection_status_text(app))
+
+    async def test_shows_disconnected_when_the_connection_drops(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)):
+                await wait_idle(app)
+                await app.ws.close()
+                await wait_until(
+                    lambda: "disconnected" in connection_status_text(app)
+                )
 
 
 if __name__ == "__main__":

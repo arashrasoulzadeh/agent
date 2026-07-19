@@ -11,6 +11,7 @@ ever crashing the connection. Nothing in this file is WebSocket-specific.
 
 import asyncio
 import logging
+from dataclasses import asdict
 from typing import Any
 
 from core import settings
@@ -56,12 +57,19 @@ async def session_create(transport: Transport, data: dict) -> dict:
         existing.subscribe(transport)
         # "room" alongside the full snapshot: cli.py's AgentApp reads
         # data["room"] from every /session/create response regardless of
-        # whether it's a fresh room or (as here) a resumed one.
-        return {"room": existing.id, **existing.state_snapshot()}
+        # whether it's a fresh room or (as here) a resumed one. "tree" is
+        # the full initial component tree (see Room.ui_tree()) — the
+        # generic renderer mounts this once, then only ever applies
+        # ui.update ops from then on.
+        return {
+            "room": existing.id,
+            **existing.state_snapshot(),
+            "tree": asdict(existing.ui_tree()),
+        }
 
     room = rooms.Room.create(path, loop)
     room.subscribe(transport)
-    return {"room": room.id}
+    return {"room": room.id, "tree": asdict(room.ui_tree())}
 
 
 async def session_resume(transport: Transport, data: dict) -> dict:
@@ -74,7 +82,7 @@ async def session_resume(transport: Transport, data: dict) -> dict:
         raise ProtocolError(f"no such room: {room_id!r}")
 
     room.subscribe(transport)
-    return room.state_snapshot()
+    return {**room.state_snapshot(), "tree": asdict(room.ui_tree())}
 
 
 async def prompt(transport: Transport, data: dict) -> dict:

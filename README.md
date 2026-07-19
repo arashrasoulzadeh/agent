@@ -369,31 +369,42 @@ see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire format itself.
 `Room` itself (`service/rooms.py`) is deliberately *not* here — see
 [Architecture](#architecture) for why.
 
-### CLI (ui)
+### CLI (ui): a server-driven UI
 
 `ui/app.py` is a single full-screen
-[Textual](https://github.com/Textualize/textual) app and a thin
-WebSocket client — it never runs the pipeline itself, it connects,
-creates or resumes a room, and renders whatever protocol events arrive.
-That's also what makes the fixed header/content/footer layout and
-internal scrolling possible in the first place: Rich's `Console`/`Live`
-only ever print into the terminal's own scrollback, but Textual redraws
-the whole screen as a bounded region and reflows it on resize.
+[Textual](https://github.com/Textualize/textual) app, and it's
+*generic*: it has no built-in knowledge of any screen — no header
+layout, no modal shapes, no command list. Everything drawable is a
+`Node` (`models/ui.py`) built server-side by `service/ui_builder.py`
+and delivered as a component tree, not as data for the client to
+interpret and lay out itself. That's also what makes the fixed
+header/content/footer layout and internal scrolling possible in the
+first place: Rich's `Console`/`Live` only ever print into the
+terminal's own scrollback, but Textual redraws the whole screen as a
+bounded region and reflows it on resize.
 
-| Module | Does |
-| --- | --- |
-| `app.py` | The `AgentApp`: layout, the header/content/footer widgets, the connection and its receive loop, input routing. |
-| `trace.py` | Renders `tool.call`/`tool.result`/`tokens` events into the header and content log. |
-| `answer.py` | Renders the `answer` event: the turn's final answer, as markdown. |
-| `error.py` | Renders the `error` event — the message is already friendly by the time it gets here (mapped server-side). |
-| `style.py` | The Rich style strings the above share. |
+`ui/app.py` mounts the full tree it gets back from `/session/create`/
+`/session/resume` once, then applies each `ui.update` event's ops
+(`replace`/`append`/`remove`) as they arrive — `AgentApp._build()`
+turns a `Node` into a widget (`"container"` → `Vertical`/`Horizontal`,
+`"text"` → `Static`, `"input"` → `Input`, `"button"` → `Button`,
+`"list"` → an `OptionList` or a scrolling `Vertical`, depending on
+`props.kind`), and `AgentApp.apply_ops()` walks the three op kinds.
+Every click, submit, or selection becomes one `/ui/event` request; the
+server decides what it means and pushes back whatever ops follow. See
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md)'s "UI component protocol"
+section for the full schema, id-naming convention, and the two things
+that stay client-local (connection status, the spinner glyph) because
+neither is server-owned room state.
 
 The receive loop is a plain asyncio task on Textual's own event loop —
-no `call_from_thread` anywhere in `ui/` anymore, since the boundary is
-the network now, not a Python thread. `tests/test_app.py` and
-`tests/test_server.py` drive a real server and a real client against
-each other (`tests/stubs.py`'s pipeline never touches the network), so
-the whole suite never spends a real API token.
+no `call_from_thread` anywhere in `ui/`, since the boundary is the
+network now, not a Python thread; incoming `ui.update` ops are applied
+through a small internal queue so a fast turn's events can never be
+applied out of order or dropped ahead of the initial tree mounting.
+`tests/test_app.py` and `tests/test_server.py` drive a real server and
+a real client against each other (`tests/stubs.py`'s pipeline never
+touches the network), so the whole suite never spends a real API token.
 
 ### Hooks
 

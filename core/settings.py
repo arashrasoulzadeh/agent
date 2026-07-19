@@ -1,6 +1,7 @@
 """Process-wide, runtime-editable configuration — settings a user can
-change from the TUI's settings screen (`/settings`, see ui/app.py's
-SettingsModal) instead of editing `.env` and restarting the server.
+change from the TUI's settings screen (`/settings`, see
+service/ui_builder.py's settings_modal_node) instead of editing `.env`
+and restarting the server.
 
 Every setting here is also a plain env var, read by its own module
 exactly as before (`llm/client.py`'s `get_llm()`, `llm/callbacks.py`'s

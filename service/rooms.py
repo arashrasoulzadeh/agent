@@ -462,7 +462,6 @@ class Room:
         agent's loop; this is this module's equivalent of Textual's
         `call_from_thread` — hop onto the event loop, wait for the send.
         """
-        print("SOCKET => ", name, data)
         future = asyncio.run_coroutine_threadsafe(
             events.broadcast(self.clients, self.id, name, data), self.loop
         )
@@ -510,6 +509,38 @@ class Room:
             UIOp(op="replace", target="footer-info", node=footer_info),
             UIOp(op="replace", target="footer-input", node=footer_input),
         ]
+
+    def ui_tree(self) -> Node:
+        """The full initial component tree for a client that just
+        connected or resumed — header/footer plus the whole transcript
+        replayed through the exact same content_entry_node() rendering
+        every live event uses (via _content_node), so there's only ever
+        one way a given transcript kind gets drawn. Sent once, in
+        /session/create's or /session/resume's response data
+        (wire/routes.py) — never as part of a ui.update op."""
+        model = os.getenv("GAPGPT_MODEL", "gpt-4o-mini")
+        base_url = os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1")
+        transcript_nodes = [
+            self._content_node(
+                entry["type"],
+                **{k: v for k, v in entry.items() if k not in ("type", "ts")},
+            )
+            for entry in self.transcript
+        ]
+        return ui_builder.root_tree(
+            path=self.path,
+            projects=self.project_list(),
+            room_id=self.id,
+            model=model,
+            base_url=base_url,
+            tool_names=TOOL_NAMES,
+            active_tool=self.active_tool,
+            tokens=self.tokens,
+            status_label=self.status_label,
+            awaiting_reply=self.awaiting_reply,
+            awaiting_resync=self.resync_suggested,
+            transcript_nodes=transcript_nodes,
+        )
 
     async def _emit_ui(self, ops: list[UIOp]) -> None:
         await self._emit(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})

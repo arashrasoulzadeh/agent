@@ -99,8 +99,8 @@ any request:
 
 | Route | `data` in | `data` out | Notes |
 | --- | --- | --- | --- |
-| `/session/create` | `{"path": "."}` | For a path never analyzed before: `{"room": "<id>"}` — starts a new room and its bootstrap turn in the background; the bootstrap's progress (tool calls, the answer, `session.state`) arrives as events right after this response. For a path already analyzed (see below): `{"room": "<id>", ...same payload as /session/resume}` — the existing room is resumed instead, no new bootstrap turn. | Subscribes this connection to the room either way. A room's id is derived from the path itself (`service/rooms.py`'s `room_id_for_path()`, an md5 of the resolved absolute path) — analyzing the same project again always finds and resumes the same room rather than starting a new, empty one. Even a *new* room's bootstrap turn may skip the LLM entirely if `workspace/` already has a cached analysis of this project from an earlier room — see `docs/SESSIONS.md`'s "Room bootstrap integration"; a `resync.suggested` event (below) may follow if that cache looks stale. |
-| `/session/resume` | `{"room": "<id>"}` | The room's full `session.state` payload (see below), plus `"transcript"`: every past tool call/result/message/answer/question, in order, for repainting a client's view. | Subscribes this connection to the room — loading it from `rooms/{id}.json` first if it isn't already live in the server's memory (e.g. the server just started). Error if no such room exists. |
+| `/session/create` | `{"path": "."}` | For a path never analyzed before: `{"room": "<id>", "tree": {...}}` — starts a new room and its bootstrap turn in the background; the bootstrap's progress arrives right after this response as `ui.update` ops (and, unchanged, as the semantic events below). For a path already analyzed (see below): `{"room": "<id>", ...same payload as /session/resume}` — the existing room is resumed instead, no new bootstrap turn. | Subscribes this connection to the room either way. A room's id is derived from the path itself (`service/rooms.py`'s `room_id_for_path()`, an md5 of the resolved absolute path) — analyzing the same project again always finds and resumes the same room rather than starting a new, empty one. Even a *new* room's bootstrap turn may skip the LLM entirely if `workspace/` already has a cached analysis of this project from an earlier room — see `docs/SESSIONS.md`'s "Room bootstrap integration"; a `resync.suggested` event (below) may follow if that cache looks stale. `tree` is the full initial UI component tree (see "UI component protocol" below) — a generic renderer mounts this once and applies `ui.update` ops from then on. |
+| `/session/resume` | `{"room": "<id>"}` | The room's full `session.state` payload (see below), plus `"transcript"`: every past tool call/result/message/answer/question, in order; plus `"tree"`, the same full UI component tree `/session/create` sends, already replaying that transcript through it. | Subscribes this connection to the room — loading it from `rooms/{id}.json` first if it isn't already live in the server's memory (e.g. the server just started). Error if no such room exists. |
 | `/prompt` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Submits a follow-up question. Error if a turn is already running in this room. |
 | `/reply` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Answers the agent's own mid-turn `ask` question. Error if the room isn't currently awaiting one. |
 | `/resync` | `{"room": "<id>", "confirm": true\|false}` | `{"accepted": true}` | Responds to a `resync.suggested` event (below). `confirm: true` re-analyzes the project from scratch (a real LLM call) and refreshes the cached synthesis; `confirm: false` just clears the pending flag and leaves the existing (possibly stale) cached answer in place. Error if no resync is pending for this room, or a turn is already running. |
@@ -109,6 +109,7 @@ any request:
 | `/project/list` | `{"room": "<id>"}` | `{"projects": [{"name", "path", "primary"}, ...]}` | Every project currently attached to the room — no mutation, no turn. |
 | `/settings/list` | `{}` | `{"settings": [{"key", "label", "secret", "scope", "value", "set"}, ...]}` | Every known process-wide setting (`core/settings.py`'s `SETTINGS`) and its current effective value. No room needed — settings aren't per-room. `secret` settings' `value` is always masked (`"••••"`-style); the real value never round-trips over the wire. `scope` is `"immediate"` (takes effect on the very next use, e.g. `NOTION_API_KEY`) or `"new-rooms"` (only rooms created after the change pick it up, e.g. the GapGPT settings — the LLM client is built once per room and held for its whole life). |
 | `/settings/update` | `{"key": "...", "value": "..."}` | Same shape as `/settings/list`'s `data`, refreshed. | Persists `value` for `key` to `settings.json` (gitignored, like `.env`) and applies it to the running process immediately. Error if `key` isn't a known setting. |
+| `/ui/event` | `{"room": "<id>", "component_id": "...", "event": "click"\|"submit", "value": "..."?}` | `{"accepted": true}` | The one route every interaction with the server-driven UI goes through — see "UI component protocol" below. Dispatches by `component_id`'s id/prefix, reusing `/reply`, `/resync`, `/project/add`, `/project/remove`, `/settings/update` internally. Error if `component_id` doesn't match any known id/prefix. |
 | `/rooms/list` | `{}` | `{"rooms": [{"id", "path", "updated_at"}, ...]}` | Every room saved to disk, newest first — for a resume picker. |
 
 ## Events
@@ -128,6 +129,91 @@ clients open on the same room see the same conversation as it happens).
 | `answer` | `{text}` | The turn's final answer, markdown. |
 | `resync.suggested` | `{changed, total, fraction}` | The project has drifted (files added/removed/content-changed) past a threshold since its cached analysis was made — the bootstrap answer shown is that (possibly stale) cache. Answer with `/resync`; `session.state.resync_suggested` is `true` until then. |
 | `error` | `{message}` | A turn failed. Already mapped from the exception type to a plain-English line (see `wire/errors.py`) — nothing further to translate client-side. |
+| `ui.update` | `{"ops": [{"op": "replace"\|"append"\|"remove", "target": "...", "node": {...}?}, ...]}` | Fires alongside (never instead of) every event above — the server-driven UI channel. A generic renderer (`ui/app.py`) only ever listens to this plus the initial `tree` from `/session/create`/`/session/resume`; the semantic events above still fire for any other consumer. See "UI component protocol" below. |
+
+## UI component protocol
+
+Everything a client actually draws — layout, content, modals — is a
+server-built `Node` tree (`models/ui.py`), not something the client
+decides for itself. The reference client (`ui/app.py`) is a *generic*
+renderer: a fixed vocabulary of node types it knows how to turn into
+widgets, and zero built-in knowledge of any particular screen. All of
+it is built server-side by `service/ui_builder.py`.
+
+**Node**:
+
+```json
+{"type": "container", "id": "header", "props": {"direction": "vertical"}, "children": [...]}
+```
+
+- `type` — one of `"container"` (`props.direction`: `"vertical"` |
+  `"horizontal"`), `"text"` (`props`: `text`+`style`, or `spans`: a list
+  of `{text, style}` runs, optionally `format: "markdown"` and/or
+  `panel: true` with `panel_title`/`border_style`/`padding`), `"input"`
+  (`props`: `placeholder`, `password`, `value`), `"button"` (`props`:
+  `label`), `"list"` (`props.kind`: `"log"` — a plain growing
+  scrollback, the content transcript; or `"options"` — a selectable
+  list, the command popup).
+- `id` — stable, meaningful, and reused across updates to the same
+  thing: `"header"`, `"footer-info"`, `"footer-input"`, `"content"`
+  (the transcript), `"modal"`, `"command-popup"`, `"connection-status"`
+  (reserved — see below), `f"opt-{i}"` (a question's option buttons),
+  `f"setting-{key}"` / `f"setting-{key}-row"` / `f"setting-{key}-label"`
+  (a settings field and its row/label).
+
+**UIOp** — one instruction, always inside a `ui.update` event's `ops`
+list:
+
+```json
+{"op": "replace", "target": "header", "node": {...}}
+```
+
+Exactly three kinds, deliberately — no tree-diffing engine, matching
+this project's existing "resend the whole thing, don't diff"
+precedent (`session.state` already resends its full payload on every
+change):
+
+- `replace` — swap a bounded subtree (`header`, `footer-info`,
+  `footer-input`, `modal`) for a freshly built one. Sent even when
+  nothing visible actually changed (e.g. the header rebuilds on every
+  token update) — safe only because a renderer updates an
+  already-mounted widget's *props* in place rather than unmounting and
+  remounting it wherever that matters (see below).
+- `append` — add one child to a growing list. `content` is the only
+  node this ever targets; every other node fully replaces instead.
+- `remove` — drop a node (`modal`, to dismiss it). `node` is omitted.
+
+**Two things stay client-local**, on purpose, because neither is
+server-owned room state:
+
+- **Connection status** — a disconnected client can't be told by the
+  server that it's disconnected. `header_node()` always leaves an
+  empty, reserved `connection-status` child; the server never writes
+  to it, and a renderer never lets a `header` replace touch it either
+  — it's the one node id a generic renderer owns and fills itself.
+- **Spinner animation** — `header-status`'s text says *whether* a
+  status is active and its label (`"thinking"`, `"reading the
+  project"`); the renderer animates its own glyph on a local timer,
+  never resent per-frame over the wire.
+
+**The command popup's data is sent once** (as part of `command-popup`,
+inside the initial `tree`) and filtered client-side as the user types
+— prefix-matching a few dozen already-downloaded rows needs no round
+trip. Only a completed submit (Enter, or a click) ever produces a
+request. "exit"/"quit"/"q" are intercepted the same way, before a
+footer-input submit for them is ever sent — terminating the client
+process isn't room state either.
+
+**Every other interaction is one `/ui/event` request** — a click, an
+Enter submit, a selection — dispatched server-side by `component_id`:
+a submit on `footer-input` means `/reply` (awaiting one), `/resync`
+(awaiting a confirm), a recognized `/`-command, or an ordinary
+`/prompt`, in that priority order; a click on `opt-{i}` resolves
+against the room's currently pending question's own option list; a
+submit on `setting-{key}` calls `/settings/update` and re-pushes the
+settings modal. The client never has to know which of these a given id
+means — it just forwards `{component_id, event, value}` and applies
+whatever `ui.update` ops come back.
 
 ## Rooms and persistence
 
@@ -194,5 +280,13 @@ connect ws://127.0.0.1:8765
   <- {"event": "answer", "room": "3c9e...", "data": {"text": "..."}}
 ```
 
-`cli.py`/`ui/app.py` is exactly this client, with a Textual UI on top —
-read it alongside this document for a concrete implementation.
+This example shows the semantic events (`session.state`, `tool.call`,
+`answer`, ...) — every one of them still fires, unchanged, for any
+consumer that wants them. A generic renderer like `ui/app.py` instead
+mounts `/session/create`'s `"tree"` once and applies each `ui.update`
+event's `ops` from then on; see "UI component protocol" above for that
+channel specifically.
+
+`cli.py`/`ui/app.py` is exactly this second kind of client, with a
+Textual UI on top — read it alongside this document for a concrete
+implementation.

@@ -137,8 +137,7 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
             )
             answer = await recv_until(
                 ws,
-                lambda m: m.get("event") == "answer"
-                and "hello" in m["data"]["text"],
+                lambda m: m.get("event") == "answer" and "hello" in m["data"]["text"],
             )
             self.assertIn("stub answer to: hello", answer["data"]["text"])
 
@@ -156,8 +155,7 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
             )
             answer = await recv_until(
                 ws,
-                lambda m: m.get("event") == "answer"
-                and "/xyz" in m["data"]["text"],
+                lambda m: m.get("event") == "answer" and "/xyz" in m["data"]["text"],
             )
             self.assertIn("stub answer to: /xyz", answer["data"]["text"])
 
@@ -188,7 +186,11 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
             await send_request(
                 ws,
                 "/ui/event",
-                {"component_id": "footer-input", "event": "submit", "value": "/projects"},
+                {
+                    "component_id": "footer-input",
+                    "event": "submit",
+                    "value": "/projects",
+                },
                 room=room_id,
             )
             append = await _wait_for_op(
@@ -226,9 +228,10 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
         backend_dir = Path(tempfile.mkdtemp())
         (backend_dir / "app.py").write_text("y = 2\n")
         try:
-            async with running_server(
-                StubPipeline, base_dir=base_dir
-            ) as uri, websockets.connect(uri) as ws:
+            async with (
+                running_server(StubPipeline, base_dir=base_dir) as uri,
+                websockets.connect(uri) as ws,
+            ):
                 data = await send_request(
                     ws, "/session/create", {"path": str(primary_dir)}
                 )
@@ -247,8 +250,10 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
                 )
                 state = await recv_until(
                     ws,
-                    lambda m: m.get("event") == "session.state"
-                    and any(p["name"] == "backend" for p in m["data"]["projects"]),
+                    lambda m: (
+                        m.get("event") == "session.state"
+                        and any(p["name"] == "backend" for p in m["data"]["projects"])
+                    ),
                 )
                 self.assertTrue(
                     any(p["name"] == "backend" for p in state["data"]["projects"])
@@ -267,7 +272,11 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
             await send_request(
                 ws,
                 "/ui/event",
-                {"component_id": "footer-input", "event": "submit", "value": "/settings"},
+                {
+                    "component_id": "footer-input",
+                    "event": "submit",
+                    "value": "/settings",
+                },
                 room=room_id,
             )
             modal = await _wait_for_op(
@@ -281,9 +290,10 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
 
 class TestReplyDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_footer_submit_delivers_a_reply_while_awaiting_one(self):
-        async with running_server(
-            AskToolPipeline
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(AskToolPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
@@ -299,15 +309,17 @@ class TestReplyDispatch(unittest.IsolatedAsyncioTestCase):
             )
             answer = await recv_until(
                 ws,
-                lambda m: m.get("event") == "answer"
-                and "got: Widget" in m["data"]["text"],
+                lambda m: (
+                    m.get("event") == "answer" and "got: Widget" in m["data"]["text"]
+                ),
             )
             self.assertIn("got: Widget", answer["data"]["text"])
 
     async def test_option_click_resolves_the_pending_option_by_index(self):
-        async with running_server(
-            AskToolPipeline
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(AskToolPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
@@ -318,7 +330,10 @@ class TestReplyDispatch(unittest.IsolatedAsyncioTestCase):
             await recv_until(ws, lambda m: m.get("event") == "question")
 
             await send_request(
-                ws, "/ui/event", {"component_id": "opt-1", "event": "click"}, room=room_id
+                ws,
+                "/ui/event",
+                {"component_id": "opt-1", "event": "click"},
+                room=room_id,
             )
             answer = await recv_until(
                 ws,
@@ -342,9 +357,10 @@ class TestReplyDispatch(unittest.IsolatedAsyncioTestCase):
             self.assertIn("no question is currently pending", str(cm.exception))
 
     async def test_option_click_out_of_range_is_rejected(self):
-        async with running_server(
-            AskToolPipeline
-        ) as uri, websockets.connect(uri) as ws:
+        async with (
+            running_server(AskToolPipeline) as uri,
+            websockets.connect(uri) as ws,
+        ):
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
             await recv_until(ws, lambda m: m.get("event") == "answer")
@@ -368,7 +384,10 @@ class TestReplyDispatch(unittest.IsolatedAsyncioTestCase):
             # reply_queue.get() doesn't hang this test's teardown (the
             # same class of bug fixed in tests/test_app.py earlier).
             await send_request(
-                ws, "/ui/event", {"component_id": "opt-0", "event": "click"}, room=room_id
+                ws,
+                "/ui/event",
+                {"component_id": "opt-0", "event": "click"},
+                room=room_id,
             )
             await recv_until(ws, lambda m: m.get("event") == "answer")
 

@@ -1,17 +1,34 @@
-"""The full-screen agent TUI — a thin WebSocket client.
+"""The full-screen agent TUI — a generic server-driven UI renderer.
 
-Connects to the agent server (see wire/), creates or resumes a room,
-and renders whatever the server reports. Every piece of the agent's
-activity — a tool call, a token update, the final answer, any state
-change — arrives as a protocol event over that one connection (see
-docs/PROTOCOL.md); this app never runs a pipeline or touches an LLM
-itself, and never needs `call_from_thread` — the network is the boundary
-now, not a Python thread, so the receive loop already runs on the same
-asyncio event loop Textual does.
+Connects to the agent server (see wire/), creates or resumes a room, and
+renders whatever component tree the server sends. This module has zero
+built-in knowledge of any screen (no header layout, no modal shapes, no
+command list) — everything drawable is a `Node` (models/ui.py's shape,
+mirrored here as plain dicts) built server-side by service/ui_builder.py
+and delivered two ways: once as a full tree in `/session/create`'s or
+`/session/resume`'s response (`data["tree"]`), and from then on as
+incremental `ui.update` ops (replace/append/remove — see
+docs/PROTOCOL.md's "UI component protocol" section).
 
-Layout is unchanged from before: header/content/footer, header and
-footer sized to their own content (`height: auto`), content (`1fr`)
-scrolling internally.
+Three things are deliberately still client-local, none of them room
+state:
+  - **Connection status**: a client that's disconnected can't be told
+    by the server that it's disconnected. Rendered into the reserved,
+    always-empty `connection-status` node the server's header leaves
+    for exactly this purpose.
+  - **Spinner animation**: the server only says whether a status is
+    active and its label (`header-status`'s text); the glyph frame is
+    animated locally on a timer, never resent per-frame over the wire.
+  - **Command-popup filtering and "exit"/"quit"/"q"**: the popup's data
+    (the 4 commands) is sent once and filtered locally as the user
+    types — only a completed submit round-trips. Terminating the
+    client process isn't room state either, so those three words are
+    intercepted here, before a footer-input submit for them is ever
+    sent.
+
+Every other interaction — a click, a submit, a selection — becomes one
+`/ui/event` request (`_send_ui_event`); the server decides what it means
+and pushes back whatever ui.update ops follow.
 """
 
 import asyncio
@@ -21,235 +38,75 @@ import uuid
 from typing import Any
 
 import websockets
-from rich.console import Group
-from rich.table import Table
+from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, OptionList, RichLog, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widget import Widget
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
-
-from ui import answer, error, style, trace
 
 EXIT_COMMANDS = {"exit", "quit", "q"}
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_REPLY_PLACEHOLDERS = ("Your answer…", "y/n")
+
+_CONNECTION_STATES = {
+    "connecting": ("◌ connecting…", "grey62"),
+    "connected": ("● connected", "bold green"),
+    "disconnected": ("✕ disconnected", "bold red"),
+}
 
 
-def _resync_prompt_text(data: dict[str, Any]) -> str:
-    changed = data.get("changed", 0)
-    total = data.get("total", 0)
-    return (
-        f"? {changed} of {total} files have changed since this project was "
-        "last analyzed. Re-analyze? (y/n)"
-    )
-
-
-_COMMANDS = {"/add", "/remove", "/projects", "/settings"}
-
-# (command, usage, description) — drives the command popup (see
-# AgentApp._update_command_popup) and stays in sync with _COMMANDS above
-# manually; there's no dynamic discovery here since the command set is
-# small and fixed.
-_COMMAND_HELP = [
-    ("/add", "/add <path> [name]", "Attach another project to this room"),
-    ("/remove", "/remove <name>", "Detach a project"),
-    ("/projects", "/projects", "List attached projects"),
-    ("/settings", "/settings", "Open the settings screen"),
-]
-
-
-def _parse_command(value: str) -> tuple[str, list[str]] | None:
-    """Recognizes only `/add`, `/remove`, `/projects`, `/settings` — anything else
-    (ordinary chat text, a bare "y"/"n" resync reply, an unrelated
-    slash-prefixed typo) returns None and falls through to normal
-    handling."""
-    if not value.startswith("/"):
-        return None
-    parts = value.split()
-    command = parts[0]
-    if command not in _COMMANDS:
-        return None
-    return command, parts[1:]
+def _render_text(props: dict[str, Any]):
+    """One Node(type="text") -> a Rich renderable. Covers every shape
+    service/ui_builder.py's content_entry_node/_text/_spans produce:
+    plain text+style, multi-span text, markdown, and either wrapped in
+    a Panel or not."""
+    if props.get("format") == "markdown":
+        renderable = Markdown(props.get("text", ""))
+    elif "spans" in props:
+        renderable = Text()
+        for span in props["spans"]:
+            renderable.append(span.get("text", ""), style=span.get("style"))
+    else:
+        renderable = Text(props.get("text", ""), style=props.get("style"))
+    if props.get("panel"):
+        padding = props.get("padding", [0, 0])
+        renderable = Panel(
+            renderable,
+            title=props.get("panel_title"),
+            title_align="left",
+            border_style=props.get("border_style", ""),
+            padding=tuple(padding),
+        )
+    return renderable
 
 
 class ServerError(Exception):
     """The server responded with `{"ok": false}` to a request."""
 
 
-class QuestionModal(ModalScreen[str | None]):
-    """One button per option for the agent's `ask(question, options=...)`.
-
-    Dismisses with the clicked option's own label, or None on Escape —
-    closing this without a choice leaves free-text entry as the
-    fallback (the footer input's placeholder is already switched to
-    "Your answer…" by the caller before this is pushed, so nothing is
-    lost by backing out).
-    """
-
-    BINDINGS = [("escape", "dismiss(None)", "Cancel")]
-
-    DEFAULT_CSS = """
-    QuestionModal {
-        align: center middle;
-    }
-    QuestionModal #question-box {
-        width: auto;
-        max-width: 80%;
-        border: heavy $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-    QuestionModal #question-text {
-        margin-bottom: 1;
-    }
-    QuestionModal #question-buttons {
-        align: center middle;
-        height: auto;
-    }
-    QuestionModal #question-buttons Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, question: str, options: list[str]):
-        super().__init__()
-        self.question = question
-        self.options = options
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="question-box"):
-            yield Label(self.question, id="question-text")
-            with Horizontal(id="question-buttons"):
-                for i, option in enumerate(self.options):
-                    yield Button(option, id=f"opt-{i}")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(str(event.button.label))
-
-
-class SettingsModal(ModalScreen[None]):
-    """One Label+Input row per setting from a `/settings/list` response;
-    each Input saves independently on Enter, Escape closes the whole
-    screen.
-
-    A secret setting's Input starts blank (never pre-filled with the
-    masked dots `/settings/list` sends back — submitting those literally
-    would overwrite the real value with garbage), typed in
-    `password=True` mode, and an empty submit is a no-op: the field was
-    never touched, so nothing is sent. A non-secret setting's Input
-    starts pre-filled with its real current value; any submit (even
-    unchanged) is a harmless write.
-
-    `Input.Submitted` bubbles up through this screen to the App the same
-    way it would for the footer's own input — `on_input_submitted` here
-    must call `event.stop()` or AgentApp's own handler would also fire
-    for the same keystroke, misreading a saved setting's value as a
-    chat message or command.
-    """
-
-    BINDINGS = [("escape", "dismiss(None)", "Close")]
-
-    DEFAULT_CSS = """
-    SettingsModal {
-        align: center middle;
-    }
-    SettingsModal #settings-box {
-        width: 74;
-        max-width: 92%;
-        border: heavy $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-    SettingsModal #settings-title {
-        margin-bottom: 1;
-    }
-    SettingsModal .settings-row {
-        height: auto;
-        margin-bottom: 1;
-    }
-    SettingsModal .settings-label {
-        width: 30;
-        color: $text-muted;
-    }
-    SettingsModal .settings-row Input {
-        width: 1fr;
-    }
-    SettingsModal #settings-hint {
-        margin-top: 1;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(self, app_ref: "AgentApp", settings: list[dict[str, Any]]):
-        super().__init__()
-        self._app_ref = app_ref
-        self.settings = settings
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="settings-box"):
-            yield Label("Settings", id="settings-title")
-            for s in self.settings:
-                label = s["label"]
-                if s["scope"] == "new-rooms":
-                    label += " (new rooms)"
-                with Horizontal(classes="settings-row"):
-                    yield Label(label, classes="settings-label")
-                    yield Input(
-                        value="" if s["secret"] else s["value"],
-                        placeholder=(
-                            "unchanged — type to replace" if s["secret"] else ""
-                        ),
-                        password=s["secret"],
-                        id=f"setting-{s['key']}",
-                    )
-            yield Label("Enter to save a field, Escape to close.", id="settings-hint")
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        key = (event.input.id or "").removeprefix("setting-")
-        spec = next((s for s in self.settings if s["key"] == key), None)
-        if spec is None:
-            return
-        value = event.value
-        if spec["secret"] and not value:
-            return  # untouched — never overwrite a secret with blank
-        result = await self._app_ref._safe_request_data(
-            "/settings/update", {"key": key, "value": value}
-        )
-        if result is None:
-            return
-        if spec["secret"]:
-            event.input.value = ""
-        self._app_ref.write(Text(f"Saved {spec['label']}.", style=style.INFO))
-
-
 class AgentApp(App):
     """Header (sized to its own content) / content (fills the rest) /
-    footer (sized to its own content, incl. the input line).
-
-    See ui/app.py's previous revisions for why both bands use
-    `height: auto` rather than a fixed quota, and why the footer input
-    has no distinct background — both are unchanged from before.
+    footer (sized to its own content, incl. the input line) — the exact
+    layout is whatever the server's root_tree() sends; this class only
+    fixes the CSS slots those node ids render into.
     """
 
     TITLE = "agent"
 
-    # Up/Down/Escape only do anything while the command popup is showing
-    # (each action checks that itself) — Input doesn't bind any of these
-    # three, so they always bubble here uninterrupted regardless of
-    # whether the popup is visible, with no effect on existing behavior
-    # when it isn't.
     BINDINGS = [
         Binding("up", "popup_prev", show=False),
         Binding("down", "popup_next", show=False),
-        Binding("escape", "popup_dismiss", show=False),
+        Binding("escape", "dismiss_overlay", show=False),
     ]
 
     CSS = """
     Screen {
         layout: vertical;
+        layers: base overlay;
     }
 
     #header {
@@ -286,6 +143,21 @@ class AgentApp(App):
         background: transparent;
         color: $text;
     }
+
+    #modal-slot {
+        layer: overlay;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+
+    #modal {
+        width: auto;
+        max-width: 90%;
+        border: heavy $primary;
+        padding: 1 2;
+        background: $surface;
+    }
     """
 
     def __init__(self, server_url: str, path: str, room: str | None = None):
@@ -295,33 +167,20 @@ class AgentApp(App):
         self.room: str | None = room
         self.ws: websockets.ClientConnection | None = None
 
-        self.model = "loading"
-        self.base_url = "loading"
-        self.projects: list[dict[str, Any]] = []
-        self.tool_names: list[str] = []
-        self.active_tool: str | None = None
-        self.status_label: str | None = "connecting"
-        self.tokens = {"prompt": 0, "completion": 0, "total": 0}
-        self.turn_active = True
-        self.awaiting_reply = False
-        self.awaiting_resync = False
-
+        self._widgets: dict[str, Widget] = {}
+        self._node_type: dict[str, str] = {}
+        self._modal_slot: Vertical | None = None
+        self._command_options: list[tuple[str, str]] = []
+        self._connection_state = "connecting"
+        self._header_status_props: dict[str, Any] | None = None
         self._spinner_frame = 0
-        self._shown_hint = False
         self._pending: dict[str, asyncio.Future] = {}
-
-    def compose(self) -> ComposeResult:
-        yield Static(id="header")
-        yield RichLog(id="content", wrap=True, markup=False, highlight=False)
-        with Vertical(id="footer"):
-            yield Static(id="footer-info")
-            yield OptionList(id="command-popup")
-            yield Input(placeholder="Connecting…", id="footer-input")
+        self._ui_queue: asyncio.Queue = asyncio.Queue()
+        self._root_mounted = asyncio.Event()
 
     def on_mount(self) -> None:
-        self.refresh_header()
         self.set_interval(0.1, self._tick)
-        self.query_one("#footer-input", Input).focus()
+        asyncio.create_task(self._ui_apply_loop())
         asyncio.create_task(self._connect())
 
     async def on_unmount(self) -> None:
@@ -334,7 +193,9 @@ class AgentApp(App):
         try:
             self.ws = await websockets.connect(self.server_url)
         except OSError as exc:
-            self._fatal(f"Could not reach the agent server at {self.server_url}: {exc}")
+            await self._fatal(
+                f"Could not reach the agent server at {self.server_url}: {exc}"
+            )
             return
 
         asyncio.create_task(self._receive_loop())
@@ -342,30 +203,12 @@ class AgentApp(App):
         try:
             if self.room:
                 data = await self._request("/session/resume", {"room": self.room})
-                self._apply_state(data)
-                for entry in data.get("transcript", []):
-                    self._replay(entry)
-                if not self.turn_active:
-                    self._show_hint()
             else:
                 data = await self._request("/session/create", {"path": self.path})
                 self.room = data["room"]
-                if "transcript" in data:
-                    # A room already existed for this path (room ids are
-                    # derived from the path — see service/rooms.py's
-                    # room_id_for_path()) and was resumed instead of a
-                    # fresh one being created: repaint its history exactly
-                    # like /session/resume does above.
-                    self._apply_state(data)
-                    for entry in data.get("transcript", []):
-                        self._replay(entry)
-                    if not self.turn_active:
-                        self._show_hint()
-                # Otherwise, a genuinely new room: the rest (model/tools/
-                # tokens/the bootstrap answer) arrives as events —
-                # session.state lands right after this.
+            await self._mount_root(data["tree"])
         except ServerError as exc:
-            self._fatal(str(exc))
+            await self._fatal(str(exc))
 
     async def _request(self, route: str, data: dict) -> dict:
         if self.ws is None:
@@ -400,7 +243,7 @@ class AgentApp(App):
                         "failed to handle an incoming message"
                     )
         except websockets.ConnectionClosed:
-            self._fatal("Lost connection to the agent server.")
+            await self._fatal("Lost connection to the agent server.")
 
     def _handle(self, msg: dict[str, Any]) -> None:
         if "route" not in msg and "id" in msg:
@@ -413,137 +256,213 @@ class AgentApp(App):
                 future.set_exception(ServerError(msg.get("error", "request failed")))
             return
 
-        name = msg.get("event")
-        data = msg.get("data", {})
-        if name == "session.state":
-            was_active = self.turn_active
-            self._apply_state(data)
-            if was_active and not self.turn_active:
-                self._show_hint()
-        elif name == "message":
-            self.write(Text(f"> {data['text']}", style=style.MESSAGE))
-        elif name == "tool.call":
-            trace.tool_call(self, data["name"], data["args"])
-        elif name == "tool.result":
-            trace.tool_result(self, data["output"])
-        elif name == "tokens":
-            trace.set_tokens(self, data["prompt"], data["completion"], data["total"])
-        elif name == "question":
-            self.write(Text(f"? {data['text']}", style=style.QUESTION))
-            self.query_one("#footer-input", Input).placeholder = "Your answer…"
-            options = data.get("options")
-            if options:
-                self.push_screen(
-                    QuestionModal(data["text"], options), self._on_question_answered
-                )
-        elif name == "answer":
-            answer.show(self, data["text"])
-        elif name == "error":
-            error.show(self, data["message"])
-        elif name == "resync.suggested":
-            self.awaiting_resync = True
-            self.write(Text(_resync_prompt_text(data), style=style.QUESTION))
-            self.query_one("#footer-input", Input).placeholder = "y/n"
+        # Every other event (session.state, message, tool.call, ...) still
+        # fires server-side for any other purpose, but this renderer only
+        # ever draws from ui.update — see this module's docstring.
+        if msg.get("event") == "ui.update":
+            self._ui_queue.put_nowait(msg.get("data", {}).get("ops", []))
 
-    def _replay(self, entry: dict[str, Any]) -> None:
-        kind = entry.get("type")
-        if kind == "message":
-            self.write(Text(f"> {entry['text']}", style=style.MESSAGE))
-        elif kind == "tool_call":
-            trace.tool_call(self, entry["name"], entry["args"])
-        elif kind == "tool_result":
-            trace.tool_result(self, entry["output"])
-        elif kind == "question":
-            self.write(Text(f"? {entry['text']}", style=style.QUESTION))
-        elif kind == "answer":
-            answer.show(self, entry["text"])
-        elif kind == "resync_suggested":
-            self.write(Text(_resync_prompt_text(entry), style=style.QUESTION))
-        self.active_tool = None  # replay never leaves a tool "in flight"
-
-    def _fatal(self, message: str) -> None:
-        error.show(self, message)
-        self.status_label = None
-        self.refresh_header()
-
-    # ---- rendering ----------------------------------------------------
-
-    def write(self, renderable) -> None:
-        # An event can still be in flight when the app is torn down (the
-        # receive loop is a background task, not awaited by shutdown) —
-        # there's nothing to render into anymore, so just drop it.
-        if not self.is_running:
-            return
-        self.query_one("#content", RichLog).write(renderable)
-
-    def _apply_state(self, data: dict[str, Any]) -> None:
-        self.model = data.get("model", self.model)
-        self.base_url = data.get("base_url", self.base_url)
-        self.projects = data.get("projects", self.projects)
-        self.tool_names = data.get("tools", self.tool_names)
-        self.turn_active = data.get("turn_active", self.turn_active)
-        self.status_label = data.get("status_label")
-        self.awaiting_reply = data.get("awaiting_reply", self.awaiting_reply)
-        self.awaiting_resync = data.get("resync_suggested", self.awaiting_resync)
-        self.active_tool = data.get("active_tool")
-        self.tokens = data.get("tokens", self.tokens)
-
-        footer_input = self.query_one("#footer-input", Input)
-        if self.awaiting_reply:
-            footer_input.placeholder = "Your answer…"
-        elif self.awaiting_resync:
-            footer_input.placeholder = "y/n"
+    async def _fatal(self, message: str) -> None:
+        if "content" in self._widgets:
+            await self._append_error(message)
+            self._set_connection_status("disconnected")
         else:
-            footer_input.placeholder = "Ask a follow-up, or 'exit' to quit."
-        if len(self.projects) > 1:
-            names = ", ".join(
-                p["name"] for p in sorted(self.projects, key=lambda p: p["name"])
-            )
-            info_text = f"projects {names}   room {self.room}"
-        else:
-            info_text = f"project {data.get('path', self.path)}   room {self.room}"
-        self.query_one("#footer-info", Static).update(info_text)
-        self.refresh_header()
+            # Nothing has ever been mounted (e.g. the initial connection
+            # itself was refused) — there's no screen to show this on.
+            self.exit(message=f"Error: {message}")
 
-    def refresh_header(self) -> None:
-        if not self.is_running:
+    # ---- applying server-driven UI ops -------------------------------------
+
+    async def _ui_apply_loop(self) -> None:
+        """Applies queued ui.update ops one batch at a time, in arrival
+        order. Waits for the initial tree to be mounted first — a fast
+        bootstrap turn can otherwise push ops before /session/create's
+        own response (carrying that initial tree) has come back, since
+        both travel over the same connection."""
+        while True:
+            ops = await self._ui_queue.get()
+            await self._root_mounted.wait()
+            try:
+                await self.apply_ops(ops)
+            except Exception:
+                logging.getLogger("ui.app").exception("failed to apply ui.update ops")
+
+    async def apply_ops(self, ops: list[dict]) -> None:
+        for op in ops:
+            kind = op["op"]
+            target = op["target"]
+            if kind == "replace":
+                await self._replace(target, op["node"])
+            elif kind == "append":
+                await self._append(target, op["node"])
+            elif kind == "remove":
+                await self._remove(target)
+
+    async def _replace(self, target: str, node: dict) -> None:
+        # footer-input's live, not-yet-submitted typed value must survive
+        # a replace that only changed the placeholder/password mode — see
+        # service/ui_builder.py's module docstring for why.
+        if target == "footer-input":
+            widget = self._widgets.get("footer-input")
+            if isinstance(widget, Input):
+                props = node.get("props", {})
+                widget.placeholder = props.get("placeholder", "")
+                widget.password = props.get("password", False)
+                return
+
+        if target == "header":
+            self._header_status_props = None  # _build repopulates if present
+
+        existing = self._widgets.pop(target, None)
+        new_widget = self._build(node)
+
+        if target == "modal":
+            await self._modal_slot.mount(new_widget)
+            self._modal_slot.display = True
+            if existing is not None:
+                await existing.remove()
             return
-        top = Table.grid(expand=True)
-        top.add_column(ratio=1)
-        top.add_column(justify="right")
-        top.add_row(
-            Text(" ⚡ AGENT", style="bold bright_cyan"),
-            Text(f"tokens {self.tokens['total']:,} ", style="bold bright_white"),
+
+        if existing is None:
+            return
+        parent = existing.parent
+        await parent.mount(new_widget, before=existing)
+        await existing.remove()
+
+    async def _append(self, target: str, node: dict) -> None:
+        container = self._widgets.get(target)
+        if container is None:
+            return
+        widget = self._build(node)
+        await container.mount(widget)
+        if target == "content":
+            container.scroll_end(animate=False)
+
+    async def _remove(self, target: str) -> None:
+        existing = self._widgets.pop(target, None)
+        self._node_type.pop(target, None)
+        if existing is None:
+            return
+        await existing.remove()
+        if target == "modal":
+            self._modal_slot.display = False
+
+    async def _mount_root(self, tree: dict) -> None:
+        self._modal_slot = Vertical(id="modal-slot")
+        root_widget = self._build(tree)
+        await self.mount(root_widget, self._modal_slot)
+        self._modal_slot.display = False
+        self._set_connection_status("connected")
+        self._root_mounted.set()
+        footer_input = self._widgets.get("footer-input")
+        if footer_input is not None:
+            footer_input.focus()
+
+    async def _append_error(self, message: str) -> None:
+        container = self._widgets.get("content")
+        if container is None:
+            return
+        node_id = f"local-error-{uuid.uuid4().hex}"
+        widget = Static(
+            Panel(
+                Text(message, style="bold red"),
+                title="error",
+                title_align="left",
+                border_style="red",
+                padding=(0, 2),
+            ),
+            id=node_id,
         )
+        self._widgets[node_id] = widget
+        await container.mount(widget)
+        container.scroll_end(animate=False)
 
-        config = Text(f"  model {self.model}    url {self.base_url}", style="grey62")
+    # ---- building widgets from nodes ---------------------------------------
 
-        tools_line = Text("  tools  ")
-        for name in self.tool_names:
-            active = name == self.active_tool
-            tool_style = "bold bright_green" if active else "grey50"
-            tools_line.append(("▶" if active else " ") + name + "  ", style=tool_style)
+    def _build(self, node: dict) -> Widget:
+        """Constructs a fresh widget (and, for a container/list, its
+        whole subtree) from one Node dict. Never mutates an
+        already-mounted widget — that's `_replace`'s footer-input
+        special case only; everything else in this app is cheap enough
+        to fully rebuild on every change, matching this project's
+        existing "resend the whole thing, don't diff" precedent.
+        """
+        node_id = node["id"]
+        node_type = node["type"]
+        props = node.get("props", {})
+        self._node_type[node_id] = node_type
 
-        lines = [top, config, tools_line]
-        if self.status_label is not None:
-            frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
-            lines.append(
-                Text(f"  {frame} {self.status_label}…", style="bold bright_yellow")
+        if node_id == "connection-status":
+            # Reserved, client-owned slot — the server always sends this
+            # empty; only _set_connection_status ever writes its content.
+            widget = Static(self._render_connection_status(), id=node_id)
+        elif node_type == "container":
+            children = [self._build(c) for c in node.get("children", [])]
+            cls = Horizontal if props.get("direction") == "horizontal" else Vertical
+            widget = cls(*children, id=node_id)
+        elif node_type == "text":
+            if node_id == "header-status":
+                self._header_status_props = props
+                widget = Static(self._render_header_status(), id=node_id)
+            else:
+                widget = Static(_render_text(props), id=node_id)
+        elif node_type == "input":
+            widget = Input(
+                value=props.get("value", ""),
+                placeholder=props.get("placeholder", ""),
+                password=props.get("password", False),
+                id=node_id,
             )
+        elif node_type == "button":
+            widget = Button(props.get("label", ""), id=node_id)
+        elif node_type == "list" and props.get("kind") == "options":
+            # The command popup: its data is downloaded once here, then
+            # filtered locally as the user types (_update_command_popup) —
+            # never re-fetched or re-sent per keystroke.
+            widget = OptionList(id=node_id)
+            self._command_options = [
+                (c["props"]["value"], c["props"]["text"])
+                for c in node.get("children", [])
+            ]
+            for value, text in self._command_options:
+                widget.add_option(Option(text, id=value))
+            widget.display = props.get("display", True)
+        elif node_type == "list":  # kind == "log" — the content transcript
+            children = [self._build(c) for c in node.get("children", [])]
+            widget = VerticalScroll(*children, id=node_id)
+        else:
+            raise ValueError(f"unknown node: {node!r}")
 
-        self.query_one("#header", Static).update(Group(*lines))
+        self._widgets[node_id] = widget
+        return widget
+
+    # ---- client-local cosmetics: connection status + spinner --------------
+
+    def _render_connection_status(self) -> Text:
+        label, style_name = _CONNECTION_STATES[self._connection_state]
+        return Text(f"  {label}", style=style_name)
+
+    def _set_connection_status(self, state: str) -> None:
+        self._connection_state = state
+        widget = self._widgets.get("connection-status")
+        if widget is not None:
+            widget.update(self._render_connection_status())
+
+    def _render_header_status(self) -> Text:
+        frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+        label = (self._header_status_props or {}).get("text", "").strip()
+        style_name = (self._header_status_props or {}).get("style")
+        return Text(f"  {frame} {label}", style=style_name)
 
     def _tick(self) -> None:
-        if self.status_label is not None:
-            self._spinner_frame += 1
-            self.refresh_header()
+        if self._header_status_props is None:
+            return
+        self._spinner_frame += 1
+        widget = self._widgets.get("header-status")
+        if widget is not None:
+            widget.update(self._render_header_status())
 
-    def _show_hint(self) -> None:
-        if not self._shown_hint:
-            self._shown_hint = True
-            self.write(Text("Ask a follow-up, or 'exit' to quit.", style=style.INFO))
-
-    # ---- input handling -------------------------------------------------
+    # ---- command popup (client-local filtering only) -----------------------
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "footer-input":
@@ -551,49 +470,36 @@ class AgentApp(App):
         self._update_command_popup(event.value)
 
     def _update_command_popup(self, value: str) -> None:
-        """Shows every command whose name starts with the input's first
-        token while that token is still ambiguous or incomplete; hides
-        once it's an exact, unambiguous match and the user has moved on
-        to typing arguments (a space after it), or once awaiting_reply/
-        awaiting_resync means "/"-prefixed text isn't treated as a
-        command at all (see on_input_submitted's early returns)."""
-        popup = self.query_one("#command-popup", OptionList)
+        popup = self._widgets.get("command-popup")
+        footer_input = self._widgets.get("footer-input")
+        if popup is None or footer_input is None or not isinstance(popup, OptionList):
+            return
+        reply_mode = footer_input.placeholder in _REPLY_PLACEHOLDERS
         first_token = value.split(" ", 1)[0]
-        matches = [c for c in _COMMAND_HELP if c[0].startswith(first_token)]
+        matches = [c for c in self._command_options if c[0].startswith(first_token)]
         exact_and_past_it = (
             len(matches) == 1 and matches[0][0] == first_token and " " in value
         )
-        if (
-            self.awaiting_reply
-            or self.awaiting_resync
-            or not value.startswith("/")
-            or not matches
-            or exact_and_past_it
-        ):
+        if reply_mode or not value.startswith("/") or not matches or exact_and_past_it:
             popup.display = False
             return
-
         popup.display = True
         popup.clear_options()
-        for command, usage, description in matches:
-            popup.add_option(Option(f"{usage}  —  {description}", id=command))
+        for command, text in matches:
+            popup.add_option(Option(text, id=command))
         popup.highlighted = 0
 
     def _accept_command_popup(self, input_widget: Input, value: str) -> bool:
         """If the popup is showing a suggestion and `value` isn't
         already a complete, recognized command, Enter completes the
-        input to the highlighted suggestion instead of submitting —
-        returns True in that case. Returns False for every other case
-        (already-valid command, popup not showing, no matches), leaving
-        on_input_submitted's normal handling completely untouched —
-        including the existing "unrecognized slash text falls through
-        to being sent as chat" behavior when there's no match at all.
-        """
-        if self.awaiting_reply or self.awaiting_resync:
+        input to the highlighted suggestion instead of submitting."""
+        popup = self._widgets.get("command-popup")
+        if popup is None or not isinstance(popup, OptionList):
             return False
-        if _parse_command(value) is not None:
+        if input_widget.placeholder in _REPLY_PLACEHOLDERS:
             return False
-        popup = self.query_one("#command-popup", OptionList)
+        if any(c[0] == value for c in self._command_options):
+            return False
         if not popup.display or popup.option_count == 0:
             return False
         index = popup.highlighted or 0
@@ -603,123 +509,88 @@ class AgentApp(App):
         return True
 
     def action_popup_prev(self) -> None:
-        popup = self.query_one("#command-popup", OptionList)
-        if not popup.display or popup.option_count == 0:
+        popup = self._widgets.get("command-popup")
+        if (
+            not isinstance(popup, OptionList)
+            or not popup.display
+            or not popup.option_count
+        ):
             return
         popup.highlighted = ((popup.highlighted or 0) - 1) % popup.option_count
 
     def action_popup_next(self) -> None:
-        popup = self.query_one("#command-popup", OptionList)
-        if not popup.display or popup.option_count == 0:
+        popup = self._widgets.get("command-popup")
+        if (
+            not isinstance(popup, OptionList)
+            or not popup.display
+            or not popup.option_count
+        ):
             return
         popup.highlighted = ((popup.highlighted or 0) + 1) % popup.option_count
 
-    def action_popup_dismiss(self) -> None:
-        popup = self.query_one("#command-popup", OptionList)
-        popup.display = False
+    def action_dismiss_overlay(self) -> None:
+        """Escape: hides the command popup if it's showing; otherwise
+        hides a visible modal. Purely a local visibility toggle — no
+        request is sent, so a dismissed question modal correctly leaves
+        free-text entry live as a fallback (awaiting_reply is unchanged,
+        server-side), and a re-replaced modal (e.g. a later question)
+        shows normally regardless of whether this ever ran."""
+        popup = self._widgets.get("command-popup")
+        if isinstance(popup, OptionList) and popup.display:
+            popup.display = False
+            return
+        if self._modal_slot is not None and self._modal_slot.display:
+            self._modal_slot.display = False
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id != "command-popup":
             return
-        input_widget = self.query_one("#footer-input", Input)
-        input_widget.value = f"{event.option.id} "
-        input_widget.cursor_position = len(input_widget.value)
-        input_widget.focus()
+        footer_input = self._widgets.get("footer-input")
+        if not isinstance(footer_input, Input):
+            return
+        footer_input.value = f"{event.option.id} "
+        footer_input.cursor_position = len(footer_input.value)
+        footer_input.focus()
+
+    # ---- forwarding interactions to the server -----------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        input_widget = event.input
+        component_id = input_widget.id
+        if component_id is None:
+            return
         value = event.value.strip()
 
-        if self._accept_command_popup(event.input, value):
-            return
-
-        event.input.value = ""
-
-        if self.awaiting_reply:
-            await self._safe_request("/reply", {"text": value})
-            return
-
-        if self.awaiting_resync:
-            self.awaiting_resync = False
-            confirm = value.lower() in ("y", "yes")
-            await self._safe_request("/resync", {"confirm": confirm})
-            return
-
-        parsed = _parse_command(value)
-        if parsed is not None:
-            command, args = parsed
-            await self._handle_command(command, args)
-            return
-
-        if self.turn_active:
-            return
-
-        if not value or value.lower() in EXIT_COMMANDS:
-            self.exit()
-            return
-
-        await self._safe_request("/prompt", {"text": value})
-
-    async def _handle_command(self, command: str, args: list[str]) -> None:
-        if command == "/projects":
-            self._show_projects()
-            return
-        if command == "/add":
-            if not args:
-                self.write(Text("Usage: /add <path> [name]", style=style.INFO))
+        if component_id == "footer-input":
+            if self._accept_command_popup(input_widget, value):
                 return
-            data: dict[str, str] = {"path": args[0]}
-            if len(args) > 1:
-                data["name"] = args[1]
-            await self._safe_request("/project/add", data)
-            return
-        if command == "/remove":
-            if not args:
-                self.write(Text("Usage: /remove <name>", style=style.INFO))
+            if value.lower() in EXIT_COMMANDS:
+                self.exit()
                 return
-            await self._safe_request("/project/remove", {"name": args[0]})
-            return
-        if command == "/settings":
-            data = await self._safe_request_data("/settings/list", {})
-            if data is not None:
-                self.push_screen(SettingsModal(self, data["settings"]))
-            return
+            input_widget.value = ""
+        elif component_id.startswith("setting-") and input_widget.password:
+            # Optimistic local clear for a just-submitted secret field —
+            # the server's next modal replace also sends it back blank,
+            # but this avoids a stale-looking value in the meantime.
+            input_widget.value = ""
 
-    def _show_projects(self) -> None:
-        if not self.projects:
-            self.write(Text("No projects attached.", style=style.INFO))
-            return
-        lines = ["Attached projects:"]
-        for p in sorted(self.projects, key=lambda p: p["name"]):
-            marker = "primary" if p.get("primary") else "secondary"
-            lines.append(f"  {p['name']} ({marker})  {p['path']}")
-        self.write(Text("\n".join(lines), style=style.INFO))
+        await self._send_ui_event(component_id, "submit", value)
 
-    def _on_question_answered(self, value: str | None) -> None:
-        """QuestionModal's dismiss callback. None means Escape — the
-        free-text footer input (already switched to "Your answer…"
-        when the question arrived) is still live as a fallback, so
-        there's nothing to do here."""
-        if value is None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id is None:
             return
-        asyncio.create_task(self._deliver_reply(value))
+        await self._send_ui_event(event.button.id, "click")
 
-    async def _deliver_reply(self, value: str) -> None:
-        self.write(Text(f"> {value}", style=style.MESSAGE))
-        await self._safe_request("/reply", {"text": value})
+    async def _send_ui_event(
+        self, component_id: str, event: str, value: str | None = None
+    ) -> None:
+        data: dict[str, str] = {"component_id": component_id, "event": event}
+        if value is not None:
+            data["value"] = value
+        await self._safe_request("/ui/event", data)
 
     async def _safe_request(self, route: str, data: dict) -> None:
         try:
             await self._request(route, data)
         except ServerError as exc:
-            error.show(self, str(exc))
-
-    async def _safe_request_data(self, route: str, data: dict) -> dict | None:
-        """Like _safe_request, but returns the response payload on
-        success instead of discarding it — for callers (the /settings
-        command, SettingsModal's per-field saves) that need to read the
-        result rather than just fire-and-report-errors."""
-        try:
-            return await self._request(route, data)
-        except ServerError as exc:
-            error.show(self, str(exc))
-            return None
+            await self._append_error(str(exc))
