@@ -5,11 +5,16 @@
  * (contextIsolation is on, nodeIntegration is off — the renderer itself
  * never gets `require`). Exposes exactly three things:
  *
- *   - `agentComponents` — the shared UI vocabulary from components/js/
- *     (see that folder's docstring): style tokens, exit commands, the
- *     spinner/connection-state constants, and the Rich-style-string ->
- *     CSS parser. The single source of truth ui/app.py also reads, via
- *     components/__init__.py.
+ *   - `agentComponents` — interpreter code only, not data: the
+ *     Rich-style-string -> CSS parser (components/js/richStyle.js) and
+ *     its color-table setter. The actual UI vocabulary (style tokens,
+ *     exit commands, spinner frames, connection-state labels, the color
+ *     table itself) is never bundled here — renderer.js fetches it live
+ *     from the server (`/ui/spec`, right after connecting) and calls
+ *     setRichColors() with the result. Same principle ui/app.py follows
+ *     on the Python side: a client ships the ability to interpret the
+ *     server's UI vocabulary, never a local copy of the vocabulary
+ *     itself, so a change to it needs no client rebuild.
  *   - `agentEnv` — where to find the agent server (same
  *     AGENT_WS_HOST/AGENT_WS_PORT env vars wire/config.py reads).
  *   - `agentNative` — native capabilities the renderer needs that the
@@ -20,12 +25,11 @@
  */
 
 const { contextBridge, ipcRenderer, clipboard } = require('electron');
-const components = require('../components/js/index.js');
-const { parseRichStyle } = require('../components/js/richStyle.js');
+const { parseRichStyle, setRichColors } = require('../components/js/richStyle.js');
 
 contextBridge.exposeInMainWorld('agentComponents', {
-  ...components,
   parseRichStyle,
+  setRichColors,
 });
 
 contextBridge.exposeInMainWorld('agentEnv', {

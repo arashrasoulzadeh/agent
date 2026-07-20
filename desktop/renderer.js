@@ -21,10 +21,33 @@
  * script. That keeps this app's startup and interaction latency close
  * to Electron's floor, and keeps the whole client small enough to read
  * start to finish alongside ui/app.py when adding a feature to both.
+ *
+ * This client's own local UI vocabulary (style tokens, exit words,
+ * spinner frames, reply placeholders, connection-state labels, the Rich
+ * color table) is never bundled — see preload.js's docstring. main()
+ * fetches it fresh from the server (/ui/spec) as its first request,
+ * before rendering anything, and fetchUiSpec() below assigns it into
+ * these `let` bindings; every function below reads them at call time,
+ * so nothing here needs to know or care that they started out empty.
  */
 
-const { STYLE_TOKENS, EXIT_COMMANDS, REPLY_PLACEHOLDERS, SPINNER_FRAMES, CONNECTION_STATES, parseRichStyle } =
-  window.agentComponents;
+const { parseRichStyle, setRichColors } = window.agentComponents;
+
+let STYLE_TOKENS = {};
+let EXIT_COMMANDS = [];
+let REPLY_PLACEHOLDERS = [];
+let SPINNER_FRAMES = '';
+let CONNECTION_STATES = {};
+
+async function fetchUiSpec() {
+  const spec = await request('/ui/spec', {});
+  STYLE_TOKENS = spec.styleTokens;
+  EXIT_COMMANDS = spec.exitCommands;
+  REPLY_PLACEHOLDERS = spec.replyPlaceholders;
+  SPINNER_FRAMES = spec.spinnerFrames;
+  CONNECTION_STATES = spec.connectionStates;
+  setRichColors(spec.richColors);
+}
 
 // ---- tiny DOM helpers ------------------------------------------------
 
@@ -277,6 +300,11 @@ function build(node) {
   } else if (type === 'container') {
     node_el = el('div', `node-container ${props.direction === 'horizontal' ? 'row' : 'col'}`);
     for (const child of children) node_el.appendChild(build(child));
+    // A bordered/titled container — e.g. service/ui_builder.py's
+    // agent_ui_node(), the show_ui tool's rendering — reuses the exact
+    // same chrome a panel-wrapped text node gets (applyPanelChrome,
+    // below), just applied to a container instead of a single text div.
+    if (props.panel) applyPanelChrome(node_el, props);
   } else if (type === 'text') {
     if (id === 'header-status') {
       headerStatusProps = props;
@@ -313,6 +341,33 @@ function build(node) {
   return node_el;
 }
 
+// Shared by a panel-wrapped text node (below) and a panel-wrapped
+// container (build()'s container branch, above) — same chrome either
+// way: a border/padding/optional title on whichever element already
+// holds the real content, inserted at that element's front so the
+// title always reads first regardless of what kind of node it is.
+function applyPanelChrome(target, props) {
+  target.classList.add('node-panel');
+  const [padV, padH] = props.padding || [0, 0];
+  target.style.padding = `${padV * 6 + 6}px ${padH * 8 + 10}px`;
+  const borderColor = parseRichStyle(props.border_style || '').color;
+  if (borderColor) {
+    // Left edge deliberately untouched — styles.css's
+    // .node-panel:not(.error-panel) rule owns it (an accent stripe
+    // marking "elevated surface"); setting all four sides here would
+    // win over that CSS rule via inline-style precedence and flatten
+    // every panel back to a single flat border color.
+    target.style.borderTopColor = borderColor;
+    target.style.borderRightColor = borderColor;
+    target.style.borderBottomColor = borderColor;
+  }
+  if (props.panel_title) {
+    const title = el('div', 'node-panel-title');
+    title.textContent = props.panel_title;
+    target.insertBefore(title, target.firstChild);
+  }
+}
+
 function buildText(props) {
   let inner;
   if (props.format === 'markdown') {
@@ -333,26 +388,9 @@ function buildText(props) {
   }
 
   if (props.panel) {
-    const panel = el('div', 'node-text node-panel');
-    const [padV, padH] = props.padding || [0, 0];
-    panel.style.padding = `${padV * 6 + 6}px ${padH * 8 + 10}px`;
-    const borderColor = parseRichStyle(props.border_style || '').color;
-    if (borderColor) {
-      // Left edge deliberately untouched — styles.css's
-      // .node-panel:not(.error-panel) rule owns it (an accent stripe
-      // marking "elevated surface"); setting all four sides here would
-      // win over that CSS rule via inline-style precedence and flatten
-      // every panel back to a single flat border color.
-      panel.style.borderTopColor = borderColor;
-      panel.style.borderRightColor = borderColor;
-      panel.style.borderBottomColor = borderColor;
-    }
-    if (props.panel_title) {
-      const title = el('div', 'node-panel-title');
-      title.textContent = props.panel_title;
-      panel.appendChild(title);
-    }
+    const panel = el('div', 'node-text');
     panel.appendChild(inner);
+    applyPanelChrome(panel, props);
     return panel;
   }
 
@@ -390,7 +428,16 @@ function highlightPopupRow() {
 // ---- client-local cosmetics: connection status + spinner --------------
 
 function renderConnectionStatus(node_el) {
-  const [label, styleName] = CONNECTION_STATES[connectionState];
+  // CONNECTION_STATES is empty until fetchUiSpec() resolves — reachable
+  // for real the moment main() calls setConnectionStatus('connecting')
+  // right after the socket opens, before that fetch's own response has
+  // arrived yet. Leaving the readout blank for that brief window (or,
+  // on a connection that fails outright, for good — we never got the
+  // server's own labels to show) is the honest behavior: this client
+  // has no local fallback copy of that vocabulary to fall back to.
+  const entry = CONNECTION_STATES[connectionState];
+  if (!entry) return;
+  const [label, styleName] = entry;
   node_el.textContent = `  ${label}`;
   node_el.dataset.state = connectionState; // styles.css's connected/disconnected glow
   applyRichStyleTo(node_el, styleName);
@@ -939,6 +986,15 @@ async function main() {
   attachSocketHandlers(socket);
 
   try {
+    // Before anything else — every other request below assumes exit
+    // words, spinner frames, reply placeholders, and connection-state
+    // labels are already known.
+    await fetchUiSpec();
+    // A request/response round trip just succeeded, so the connection
+    // genuinely is up now — reflect that in the topbar rather than
+    // leaving it on whatever setConnectionStatus('connecting') (called
+    // before the spec existed to render anything) left it at.
+    setConnectionStatus('connected');
     const [promptData, roomsData] = await Promise.all([
       request('/session/prompt', {}),
       request('/rooms/list', {}),

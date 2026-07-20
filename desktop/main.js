@@ -26,12 +26,13 @@ function createWindow() {
       // The safe baseline: the renderer itself gets no Node access
       // (nodeIntegration: false) and no shared JS scope with main
       // (contextIsolation: true) — only preload.js runs with Node
-      // access, and it exposes just three narrow, read-only bridges
-      // (see preload.js). `sandbox: false` (not the default) is what
-      // lets that preload script `require('fs')`/`require('path')` to
-      // read components/js/index.js — Electron's sandboxed preload
-      // context only polyfills a small built-in allowlist and can't
-      // load arbitrary local files at all.
+      // access, and it exposes just a few narrow bridges (see
+      // preload.js). `sandbox: false` (not the default) is what lets
+      // that preload script `require('../components/js/richStyle.js')`
+      // at all — Electron's sandboxed preload context only resolves a
+      // small built-in module allowlist (electron, events, timers, url)
+      // and can't require any local relative file, regardless of what
+      // that file itself does or doesn't import.
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,

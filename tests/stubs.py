@@ -110,6 +110,34 @@ class AskToolPipeline(StubPipeline):
         return f"stub answer to: {question}"
 
 
+class ShowUiPipeline(StubPipeline):
+    """Like StubPipeline, but the question 'show-me' drives the
+    `show_ui` tool via core.ui_context — exercising the same path
+    tool/ui.py uses. 'show-me-with-replies' does the same plus a small
+    set of quick-reply buttons, exercising the click -> /prompt path."""
+
+    def ask(self, question: str) -> str:
+        self.questions.append(question)
+        if question in ("show-me", "show-me-with-replies"):
+            from core import ui_context
+
+            blocks = [
+                {"kind": "text", "text": "intro line"},
+                {"kind": "table", "headers": ["A", "B"], "rows": [["1", "2"]]},
+                {"kind": "facts", "pairs": {"Recommended": "pnpm"}},
+                {"kind": "list", "items": ["x", "y"]},
+                {"kind": "markdown", "text": "**bold**"},
+            ]
+            quick_replies = (
+                ["Option A", "Option B"]
+                if question == "show-me-with-replies"
+                else None
+            )
+            result = ui_context.show("Comparison", blocks, quick_replies)
+            return f"shown: {result}"
+        return f"stub answer to: {question}"
+
+
 class SlowPipeline(StubPipeline):
     """Like StubPipeline, but holds a turn open briefly — for tests that
     need to reliably observe a *transient* in-flight state (e.g. the

@@ -221,15 +221,148 @@ def settings_modal_node(settings: list[dict[str, Any]]) -> Node:
     )
 
 
+def _format_list(items: Any) -> str:
+    if not isinstance(items, list):
+        return str(items)
+    return "\n".join(f"• {item}" for item in items)
+
+
+def _format_facts(pairs: Any) -> str:
+    if not isinstance(pairs, dict) or not pairs:
+        return ""
+    label_width = max(len(str(k)) for k in pairs)
+    return "\n".join(f"{str(k).rjust(label_width)}:  {v}" for k, v in pairs.items())
+
+
+def _format_table(headers: Any, rows: Any) -> str:
+    """A small ASCII table, column-aligned with plain spaces — no markup,
+    no box-drawing characters. Deliberately not a Rich Table/HTML
+    <table>: this is a plain "text" Node like every other block, so it
+    renders correctly through the exact same path a plain string does on
+    both clients (a terminal is always monospace; desktop's #content is
+    set to the same monospace font specifically so this alignment
+    survives there too — see desktop/styles.css's #content rule)."""
+    headers = [str(h) for h in headers] if isinstance(headers, list) else []
+    str_rows = [
+        [str(cell) for cell in row]
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, list)
+    ]
+    if not headers and not str_rows:
+        return ""
+
+    widths = [len(h) for h in headers]
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            if i >= len(widths):
+                widths.append(len(cell))
+            else:
+                widths[i] = max(widths[i], len(cell))
+
+    def _fmt_row(cells: list[str]) -> str:
+        return "  ".join(
+            cell.ljust(widths[i]) if i < len(widths) else cell
+            for i, cell in enumerate(cells)
+        )
+
+    lines = []
+    if headers:
+        lines.append(_fmt_row(headers))
+        lines.append("  ".join("-" * w for w in widths))
+    lines.extend(_fmt_row(row) for row in str_rows)
+    return "\n".join(lines)
+
+
+def _block_node(node_id: str, block: Any) -> Node:
+    """One show_ui block -> one Node. Defensive by necessity: `block`'s
+    shape comes straight from the LLM's tool-call arguments, which can
+    be malformed (a typo'd "kind", a list where a dict was expected) —
+    this never raises, it degrades to a plain-text rendering of
+    whatever it got instead, so one bad block can't fail an entire turn.
+    """
+    if not isinstance(block, dict):
+        return _text(node_id, str(block), INFO)
+    kind = block.get("kind")
+    if kind == "markdown":
+        return Node(
+            type="text",
+            id=node_id,
+            props={"text": str(block.get("text", "")), "format": "markdown"},
+        )
+    if kind == "text":
+        return _text(node_id, str(block.get("text", "")), INFO)
+    if kind == "list":
+        return _text(node_id, _format_list(block.get("items", [])), INFO)
+    if kind == "facts":
+        return _text(node_id, _format_facts(block.get("pairs")), INFO)
+    if kind == "table":
+        return _text(node_id, _format_table(block.get("headers"), block.get("rows")), INFO)
+    return _text(node_id, f"[unrecognized block kind {kind!r}]", INFO)
+
+
+def agent_ui_node(
+    node_id: str,
+    title: str | None,
+    blocks: list[Any],
+    quick_replies: list[dict[str, str]],
+) -> Node:
+    """Compiles the show_ui tool's arguments (see tool/ui.py) into the
+    same Node primitives every other content entry uses: a
+    bordered/titled container — ui/app.py's _build() and
+    desktop/renderer.js's build() both gained panel support for
+    type="container", not just type="text", specifically for this —
+    holding one text-ish node per block plus an optional row of
+    quick-reply buttons (type="button", the same primitive
+    question_modal_node()'s option buttons above already use). Nothing
+    here is a new node type or a new client capability: this whole
+    feature needed zero new client-side rendering code beyond that one
+    generic container-panel extension, because both clients already
+    understood every primitive this compiles into.
+
+    `quick_replies` arrives as `[{"id", "label"}, ...]` with ids already
+    decided by the caller (service/rooms.py's `Room.show_ui`) — this
+    function is a pure compiler, matching this module's own "no I/O, no
+    side effects" rule; it never generates an id itself.
+    """
+    children = [
+        _block_node(f"{node_id}-block-{i}", block) for i, block in enumerate(blocks)
+    ]
+    if quick_replies:
+        children.append(
+            Node(
+                type="container",
+                id=f"{node_id}-replies",
+                props={"direction": "horizontal"},
+                children=[
+                    Node(type="button", id=qr["id"], props={"label": qr["label"]})
+                    for qr in quick_replies
+                ],
+            )
+        )
+    return Node(
+        type="container",
+        id=node_id,
+        props={
+            "direction": "vertical",
+            "panel": True,
+            "panel_title": title,
+            "border_style": "bright_cyan",
+            "padding": [1, 2],
+        },
+        children=children,
+    )
+
+
 def content_entry_node(kind: str, node_id: str, **fields: Any) -> Node:
     """One node for the content transcript, appended (never replaced)
     as the conversation grows. `kind` matches Room.append_transcript()'s
     own "type" field 1:1 for every persisted kind (message, tool_call,
-    tool_result, answer, question, resync_suggested), plus two kinds
-    transcript never persists: "error" (transient by design — replay
-    never shows a stale error) and "info" (a local status line — usage
-    hints, "Saved X" confirmations — with no conversational meaning to
-    replay, previously built ad hoc client-side in ui/app.py).
+    tool_result, answer, question, resync_suggested, agent_ui), plus two
+    kinds transcript never persists: "error" (transient by design —
+    replay never shows a stale error) and "info" (a local status line —
+    usage hints, "Saved X" confirmations — with no conversational
+    meaning to replay, previously built ad hoc client-side in
+    ui/app.py).
     """
     if kind == "message":
         return _text(node_id, f"> {fields['text']}", MESSAGE)
@@ -281,6 +414,13 @@ def content_entry_node(kind: str, node_id: str, **fields: Any) -> Node:
         return _text(node_id, text, QUESTION)
     if kind == "info":
         return _text(node_id, fields["text"], INFO)
+    if kind == "agent_ui":
+        return agent_ui_node(
+            node_id,
+            fields.get("title"),
+            fields.get("blocks", []),
+            fields.get("quick_replies", []),
+        )
     raise ValueError(f"unknown content entry kind {kind!r}")
 
 

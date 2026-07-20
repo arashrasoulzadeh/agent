@@ -57,7 +57,7 @@ from agent.collector import ContextCollector
 from agent.config import PipelineConfig
 from agent.events import LoggingStageObserver, StageEventBus
 from agent.synthesizer import ContextSynthesizer
-from core import ask_context, guard, room_context
+from core import ask_context, guard, room_context, ui_context
 from llm import describe_active, get_llm
 from models.context import ProjectContext
 from models.project_index import ProjectIndex
@@ -344,6 +344,14 @@ class Room:
         # an "opt-N" click back to the option text it stands for. None
         # whenever no question with buttons is outstanding.
         self.pending_options: list[str] | None = None
+        # Every quick-reply button any show_ui call has ever created in
+        # this room, id -> label — unlike pending_options above, never
+        # cleared: a quick-reply row stays visible (and clickable) in
+        # the transcript's own scrollback long after the turn that
+        # created it ends, so an id from three turns ago must still
+        # resolve. wire/routes.py's /ui/event reads this the same way
+        # it reads pending_options for "opt-N".
+        self.quick_reply_labels: dict[str, str] = {}
 
         # Fresh each time, reading whatever ROOMS_DIR currently is — this
         # is what lets tests/stubs.py's `rooms.ROOMS_DIR = tmp_dir`
@@ -895,7 +903,7 @@ class Room:
     def _ask_blocking(self, question: str) -> str:
         guard.set_project_roots(self.projects, primary=WORKSPACE_PROJECT_NAME)
         room_context.set_current_room(self.id)
-        with ask_context.asker(self._ask_and_wait):
+        with ask_context.asker(self._ask_and_wait), ui_context.presenter(self.show_ui):
             return self.pipeline.ask(question)
 
     # ---- the agent's own mid-turn question -------------------------------
@@ -918,6 +926,41 @@ class Room:
         future = asyncio.run_coroutine_threadsafe(self.broadcast_state(), self.loop)
         future.result()
         return self.reply_queue.get()
+
+    # ---- the agent's own structured UI ------------------------------------
+
+    def show_ui(
+        self,
+        title: str | None,
+        blocks: list[Any],
+        quick_replies: list[str] | None,
+    ) -> str:
+        """Called from the worker thread, inside the `show_ui` tool
+        (core.ui_context routes here — see _ask_blocking's presenter
+        wiring, alongside ask_context's own asker). Synchronous,
+        mirroring RoomSink's own tool_call/tool_result pattern
+        (broadcast_now/broadcast_ui_now) for the same reason: this runs
+        inside asyncio.to_thread, not on the event loop, so it can't
+        just `await` like the async /ui/event-driven methods can.
+
+        Generates each quick-reply button's id here (not in
+        ui_builder.agent_ui_node(), which stays a pure compiler) and
+        registers it into quick_reply_labels *before* broadcasting the
+        node that displays it — a click racing in before that update
+        finishes would otherwise resolve against an id the dict doesn't
+        know yet.
+        """
+        pairs = [
+            {"id": f"quick-{uuid.uuid4().hex}", "label": str(label)}
+            for label in (quick_replies or [])[:6]
+        ]
+        self.quick_reply_labels.update({p["id"]: p["label"] for p in pairs})
+        ops = self._content_ops("agent_ui", title=title, blocks=blocks, quick_replies=pairs)
+        self.broadcast_ui_now(ops)
+        self.append_transcript(
+            {"type": "agent_ui", "title": title, "blocks": blocks, "quick_replies": pairs}
+        )
+        return "Shown to the user."
 
     async def deliver_reply(self, text: str) -> None:
         """Assumes try_consume_reply() already succeeded."""

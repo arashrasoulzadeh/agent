@@ -34,6 +34,7 @@ and pushes back whatever ui.update ops follow.
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -48,10 +49,42 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from components import CONNECTION_STATES as _CONNECTION_STATES
-from components import EXIT_COMMANDS
-from components import REPLY_PLACEHOLDERS as _REPLY_PLACEHOLDERS
-from components import SPINNER_FRAMES as _SPINNER_FRAMES
+# No `from components import ...` here on purpose: this client's local
+# UI vocabulary (exit words, spinner frames, reply placeholders,
+# connection-state labels) is fetched fresh from the server (/ui/spec —
+# see wire/routes.py's ui_spec()) as the first thing _connect() does,
+# not bundled into this install. A style token added or an exit word
+# changed server-side reaches this client on its next connect with no
+# code change here — see components/__init__.py's own docstring for the
+# full "one spec, one place" rationale this mirrors on the wire instead
+# of at import time.
+
+
+_GREY_RAMP = re.compile(r"^gr[ae]y\d+$")
+
+
+def _textual_color(rich_color: str | None, default: str = "grey") -> str:
+    """A Node's `border_style` is a Rich color string (server-built by
+    service/ui_builder.py, meant for Rich's own Panel(border_style=...) —
+    see _render_text's panel branch below, which needs no translation
+    since it *is* Rich rendering). A **widget's own** border (Textual's
+    `styles.border`, used for a panel-wrapped *container* — see _build()'s
+    container branch below) goes through Textual's own `Color.parse()`
+    instead, which knows a different, smaller vocabulary: no "greyNN"
+    ramp at all (just a flat "grey"), and "bright_x" wants an "ansi_"
+    prefix Rich doesn't use. Approximates just the handful of forms
+    service/ui_builder.py actually sends (grey35, red, bright_cyan, ...)
+    rather than a full Rich-color compatibility layer; the desktop
+    equivalent of this problem is components/js/richStyle.js's
+    colorToHex(), same reasoning, different target vocabulary."""
+    if not rich_color:
+        return default
+    name = rich_color.strip().split()[-1]  # drop a leading "bold "/"italic " etc.
+    if _GREY_RAMP.match(name):
+        return "grey"
+    if name.startswith("bright_"):
+        return f"ansi_{name}"
+    return name
 
 
 def _render_text(props: dict[str, Any]):
@@ -207,6 +240,9 @@ class AgentApp(App):
         self._modal_slot: Vertical | None = None
         self._command_options: list[tuple[str, str]] = []
         self._connection_state = "connecting"
+        # Populated by _connect()'s /ui/spec fetch, before anything else
+        # runs — see this module's top-of-file comment.
+        self._ui_spec: dict[str, Any] = {}
         self._header_status_props: dict[str, Any] | None = None
         self._spinner_frame = 0
         self._pending: dict[str, asyncio.Future] = {}
@@ -236,6 +272,10 @@ class AgentApp(App):
         asyncio.create_task(self._receive_loop())
 
         try:
+            # Before anything else — every other request below assumes
+            # exit words, spinner frames, reply placeholders, and
+            # connection-state labels are already known.
+            self._ui_spec = await self._request("/ui/spec", {})
             if self.room:
                 data = await self._request("/session/resume", {"room": self.room})
             else:
@@ -493,6 +533,22 @@ class AgentApp(App):
             children = [self._build(c) for c in node.get("children", [])]
             cls = Horizontal if props.get("direction") == "horizontal" else Vertical
             widget = cls(*children, id=node_id)
+            if props.get("panel"):
+                # A bordered/titled container — e.g. service/ui_builder.py's
+                # agent_ui_node(), the show_ui tool's rendering. Unlike a
+                # text node's panel (a Rich Panel wrapping a renderable,
+                # _render_text above), this is the *widget's own* border
+                # (Textual styles, not Rich), so its color needs
+                # _textual_color's translation, not the raw border_style.
+                widget.styles.border = (
+                    "round",
+                    _textual_color(props.get("border_style")),
+                )
+                if props.get("panel_title"):
+                    widget.border_title = props["panel_title"]
+                padding = props.get("padding")
+                if padding:
+                    widget.styles.padding = tuple(padding)
         elif node_type == "text":
             if node_id == "header-status":
                 self._header_status_props = props
@@ -532,7 +588,7 @@ class AgentApp(App):
     # ---- client-local cosmetics: connection status + spinner --------------
 
     def _render_connection_status(self) -> Text:
-        label, style_name = _CONNECTION_STATES[self._connection_state]
+        label, style_name = self._ui_spec["connectionStates"][self._connection_state]
         return Text(f"  {label}", style=style_name)
 
     def _set_connection_status(self, state: str) -> None:
@@ -542,7 +598,8 @@ class AgentApp(App):
             widget.update(self._render_connection_status())
 
     def _render_header_status(self) -> Text:
-        frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+        frames = self._ui_spec["spinnerFrames"]
+        frame = frames[self._spinner_frame % len(frames)]
         label = (self._header_status_props or {}).get("text", "").strip()
         style_name = (self._header_status_props or {}).get("style")
         return Text(f"  {frame} {label}", style=style_name)
@@ -567,7 +624,7 @@ class AgentApp(App):
         footer_input = self._widgets.get("footer-input")
         if popup is None or footer_input is None or not isinstance(popup, OptionList):
             return
-        reply_mode = footer_input.placeholder in _REPLY_PLACEHOLDERS
+        reply_mode = footer_input.placeholder in self._ui_spec["replyPlaceholders"]
         first_token = value.split(" ", 1)[0]
         matches = [c for c in self._command_options if c[0].startswith(first_token)]
         exact_and_past_it = (
@@ -589,7 +646,7 @@ class AgentApp(App):
         popup = self._widgets.get("command-popup")
         if popup is None or not isinstance(popup, OptionList):
             return False
-        if input_widget.placeholder in _REPLY_PLACEHOLDERS:
+        if input_widget.placeholder in self._ui_spec["replyPlaceholders"]:
             return False
         if any(c[0] == value for c in self._command_options):
             return False
@@ -657,7 +714,7 @@ class AgentApp(App):
         if component_id == "footer-input":
             if self._accept_command_popup(input_widget, value):
                 return
-            if value.lower() in EXIT_COMMANDS:
+            if value.lower() in self._ui_spec["exitCommands"]:
                 self.exit()
                 return
             input_widget.value = ""

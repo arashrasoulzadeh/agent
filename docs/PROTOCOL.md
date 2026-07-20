@@ -100,6 +100,7 @@ any request:
 | Route | `data` in | `data` out | Notes |
 | --- | --- | --- | --- |
 | `/session/prompt` | `{}` | `{"text": "Project path", "default": "."}` | No room needed — same no-room precedent as `/session/create` below. What the reference CLI (`cli.py`) should ask for before it has a path to call `/session/create` with; server-owned copy, not hardcoded client-side (see `wire/discovery.py`'s `fetch_session_prompt`). |
+| `/ui/spec` | `{}` | `components/spec.json`'s full contents: `{"styleTokens", "richColors", "nodeTypes", "reservedIds", "exitCommands", "replyPlaceholders", "spinnerFrames", "connectionStates"}` | No room needed — process-wide, not per-room, same as `/settings/list`. The first request every generic renderer (`ui/app.py`, `desktop/renderer.js`) makes, before `/session/prompt`/`/rooms/list`/anything else: the one piece of *client-local* UI vocabulary (connection status, the spinner, exit words, the reply-placeholder check, and — for a DOM renderer specifically — the Rich color table) that isn't room state but still shouldn't be bundled into either client's own install. See `components/__init__.py`'s docstring: a value changed here reaches every connected client on its next connect, no client code change or redeploy needed. |
 | `/session/create` | `{"path": "."}` | For a path never analyzed before: `{"room": "<id>", "tree": {...}}` — starts a new room and its bootstrap turn in the background; the bootstrap's progress arrives right after this response as `ui.update` ops (and, unchanged, as the semantic events below). For a path already analyzed (see below): `{"room": "<id>", ...same payload as /session/resume}` — the existing room is resumed instead, no new bootstrap turn. | Subscribes this connection to the room either way. A room's id is derived from the path itself (`service/rooms.py`'s `room_id_for_path()`, an md5 of the resolved absolute path) — analyzing the same project again always finds and resumes the same room rather than starting a new, empty one. Even a *new* room's bootstrap turn may skip the LLM entirely if `workspace/` already has a cached analysis of this project from an earlier room — see `docs/SESSIONS.md`'s "Room bootstrap integration"; a `resync.suggested` event (below) may follow if that cache looks stale. `tree` is the full initial UI component tree (see "UI component protocol" below) — a generic renderer mounts this once and applies `ui.update` ops from then on. |
 | `/session/resume` | `{"room": "<id>"}` | The room's full `session.state` payload (see below), plus `"transcript"`: every past tool call/result/message/answer/question, in order; plus `"tree"`, the same full UI component tree `/session/create` sends, already replaying that transcript through it. | Subscribes this connection to the room — loading it from `rooms/{id}.json` first if it isn't already live in the server's memory (e.g. the server just started). Error if no such room exists. |
 | `/prompt` | `{"room": "<id>", "text": "..."}` | `{"accepted": true}` | Submits a follow-up question. Error if a turn is already running in this room. |
@@ -148,8 +149,13 @@ it is built server-side by `service/ui_builder.py`.
 ```
 
 - `type` — one of `"container"` (`props.direction`: `"vertical"` |
-  `"horizontal"`), `"text"` (`props`: `text`+`style`, or `spans`: a list
-  of `{text, style}` runs, optionally `format: "markdown"` and/or
+  `"horizontal"`, optionally *also* `panel: true` with
+  `panel_title`/`border_style`/`padding` — the same panel props a
+  `"text"` node takes, below, just wrapping arbitrary children instead
+  of one renderable; used by `service/ui_builder.py`'s `agent_ui_node()`
+  for the `show_ui` tool's output, see "Agent-driven UI" in the root
+  README), `"text"` (`props`: `text`+`style`, or `spans`: a list of
+  `{text, style}` runs, optionally `format: "markdown"` and/or
   `panel: true` with `panel_title`/`border_style`/`padding`), `"input"`
   (`props`: `placeholder`, `password`, `value`), `"button"` (`props`:
   `label`), `"list"` (`props.kind`: `"log"` — a plain growing
@@ -160,7 +166,11 @@ it is built server-side by `service/ui_builder.py`.
   (the transcript), `"modal"`, `"command-popup"`, `"connection-status"`
   (reserved — see below), `f"opt-{i}"` (a question's option buttons),
   `f"setting-{key}"` / `f"setting-{key}-row"` / `f"setting-{key}-label"`
-  (a settings field and its row/label).
+  (a settings field and its row/label), `f"quick-{uuid4().hex}"` (a
+  `show_ui` quick-reply button — unlike `opt-{i}`, never reused or
+  recycled: each call mints fresh ids, and `Room.quick_reply_labels`
+  keeps every one ever created resolvable for the room's whole life, not
+  just the most recent).
 
 **UIOp** — one instruction, always inside a `ui.update` event's `ops`
 list:
@@ -211,6 +221,9 @@ a submit on `footer-input` means `/reply` (awaiting one), `/resync`
 (awaiting a confirm), a recognized `/`-command, or an ordinary
 `/prompt`, in that priority order; a click on `opt-{i}` resolves
 against the room's currently pending question's own option list; a
+click on `quick-{...}` resolves against `Room.quick_reply_labels` and
+submits the button's own label as an ordinary `/prompt` — indistinguishable,
+server-side, from the user having typed and sent that same text; a
 submit on `setting-{key}` calls `/settings/update` and re-pushes the
 settings modal. The client never has to know which of these a given id
 means — it just forwards `{component_id, event, value}` and applies
@@ -286,8 +299,12 @@ This example shows the semantic events (`session.state`, `tool.call`,
 consumer that wants them. A generic renderer like `ui/app.py` instead
 mounts `/session/create`'s `"tree"` once and applies each `ui.update`
 event's `ops` from then on; see "UI component protocol" above for that
-channel specifically.
+channel specifically. A generic renderer also calls `/ui/spec` first,
+before `/session/create` — omitted from the trace above since this
+example only cares about the semantic events, but see that route's own
+row above for why it comes first for `ui/app.py`/`desktop/renderer.js`.
 
 `cli.py`/`ui/app.py` is exactly this second kind of client, with a
 Textual UI on top — read it alongside this document for a concrete
-implementation.
+implementation. `desktop/renderer.js` (see `desktop/README.md`) is a
+third, DOM-based one, following the exact same sequence.

@@ -208,8 +208,9 @@ wire/       the WebSocket protocol: transport, routes, events, the accept loop
 service/    use-case orchestration: Room, its persistence
 ui/         the TUI: a thin WebSocket client
 desktop/    the Electron app: a second thin WebSocket client, same protocol
-components/ the UI vocabulary ui/, service/, and desktop/ all share — one
-            spec.json, a Python exporter and a JS exporter (see below)
+components/ server-side only: the UI vocabulary spec.json defines, read
+            by core/style.py (and, over the wire via /ui/spec, by every
+            client — see below; ui/ and desktop/ never import this)
 hooks/      lets files in extra/ hook into tool/ and agent/ without editing them
 extra/      where you drop your own hook files (see Hooks, below)
 ```
@@ -354,6 +355,7 @@ change.
 | `create_directory` | Create a directory. |
 | `execute` | Run a shell command in the project. |
 | `ask` | Put a question back to *you* when the project can't settle it — routed through `core/ask_context.py` rather than any specific transport, so this tool works the same whether it's a room asking a connected client, a test, or nothing at all. |
+| `show_ui` | Present a structured, styled panel (text/markdown/list/facts/table blocks, plus optional one-click quick-reply buttons) instead of plain prose — routed through `core/ui_context.py` the same way `ask` is, and rendered identically by `ui/app.py` and `desktop/renderer.js` since both are generic renderers of the same component vocabulary this compiles into (`service/ui_builder.py`'s `agent_ui_node()`). See [Agent-driven UI](#agent-driven-ui-show_ui). |
 | `notion_search`, `notion_read_page`, `notion_create_page`, `notion_append_text` | Search/read/write pages in a connected Notion workspace via the real Notion API (`tool/notion.py`) — a separate external system, gated behind an optional `NOTION_API_KEY`. See [Notion tools](#notion-tools-optional). |
 
 `delete` and `metadata` exist in `tool/` but set `AGENT_TOOL = False` at
@@ -481,12 +483,73 @@ UI vocabulary that isn't room state: the semantic style tokens
 color names a DOM renderer has to translate to CSS (`ui/app.py` gets
 this for free from Rich; `desktop/` doesn't), `exit`/`quit`/`q`, the
 reply placeholders, the spinner frames, and the three connection-state
-labels. `components/__init__.py` is Python's exporter of it (what
-`core/style.py` and, transitively, `ui/app.py` import);
-`components/js/index.js` + `components/js/richStyle.js` are JS's (what
-`desktop/preload.js` exposes to `desktop/renderer.js`). Add a constant
-to `spec.json` once — never hardcode it separately in `ui/app.py` or
-`desktop/renderer.js` again.
+labels.
+
+**Server-side only** — no client bundles a copy of `spec.json`.
+`components/__init__.py` is Python's reader of it, and it's imported by
+exactly one thing that's genuinely server-side: `core/style.py` (used by
+`service/ui_builder.py` to build the literal style strings that end up
+*inside* every Node's props, which is how the value actually reaches a
+client — as ordinary room-state data, the same way everything else in a
+Node does). Neither `ui/app.py` nor `desktop/renderer.js` ever imports
+`components` or reads `spec.json` directly; both fetch it fresh over the
+wire instead, as the very first request a generic renderer makes —
+`/ui/spec` (`wire/routes.py`'s `ui_spec()`, see `docs/PROTOCOL.md`) —
+before `/session/prompt`, `/rooms/list`, or anything else. That's the
+concrete payoff of "one spec, one place, served, not shipped": add a
+style token or change an exit word in `spec.json` and every connected
+client picks it up on its next connect, with no client code change, no
+client rebuild, and no client redeploy — the same principle that, later,
+lets the agent itself introduce new client-local UI concepts purely by
+changing what the server sends, never by shipping new client code.
+
+`components/js/richStyle.js` is the one piece of this that *is* still
+client-side code — necessarily: turning a Rich style string into CSS
+needs a parser, and there's no way to "fetch" the ability to parse a
+string. But the *data* it interprets against (the Rich color table)
+comes from `/ui/spec`'s response via `setRichColors()`, not from a
+bundled file — `desktop/preload.js` exposes the parser function, never
+spec data, to `desktop/renderer.js`.
+
+### Agent-driven UI (`show_ui`)
+
+The payoff of everything above: `tool/ui.py`'s `show_ui` tool lets the
+*agent itself* decide to draw a bordered panel — not just write prose —
+and it renders identically on both clients with zero client-specific
+code for this feature beyond one generic protocol extension (below).
+The LLM never sees a `Node`; it calls `show_ui` with a small, forgiving
+vocabulary of block kinds (`text`, `markdown`, `list`, `facts`, `table`)
+plus an optional `title` and up to 6 `quick_replies`, and
+`service/ui_builder.py`'s `agent_ui_node()` compiles that into an
+ordinary `container` Node — a bordered/titled panel (`props.panel`,
+`panel_title`, `border_style`) holding one text node per block and a row
+of quick-reply buttons — the exact same primitives every other screen in
+this app already uses. `list`/`facts`/`table` blocks are rendered as
+column-aligned plain text rather than a new node type, since a terminal
+(and `desktop/`'s `#content`, deliberately kept monospace — see
+"Components" above) is already a fixed-width grid; no new client
+rendering code was needed for any of the five block kinds.
+
+The one genuinely new piece is that `props.panel` now works on a
+`container` node, not just a `text` node — `ui/app.py`'s `_build()` sets
+the *widget's own* Textual border/`border_title` (a different color
+vocabulary than Rich's own `Panel`, hence `_textual_color()`'s small
+translation table there), and `desktop/renderer.js`'s `build()` reuses
+its existing text-panel CSS classes (`applyPanelChrome()`) on a
+container instead. Everything else — routing the tool call to whichever
+room is running it without a dependency cycle (`core/ui_context.py`,
+mirroring `core/ask_context.py`'s own contextvar pattern exactly),
+generating and persisting each quick-reply button's id
+(`Room.show_ui()`, `service/rooms.py`), and resolving a click back to a
+prompt (`wire/routes.py`'s `/ui/event` dispatch, a `quick-` id prefix
+alongside the existing `opt-`/`setting-` ones) — is just this project's
+existing patterns applied once more, not new mechanisms.
+
+A quick-reply click submits its label as an ordinary `/prompt`, exactly
+as if typed and sent — and unlike an `ask()` question's option buttons
+(cleared the moment it's answered), a `show_ui` quick-reply stays
+clickable for as long as it's visible in the transcript's own
+scrollback, even turns later.
 
 ### Hooks
 

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Provide Info</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f3f4f6;margin:0}
+    .card{width:min(720px,92vw);background:white;padding:28px;border-radius:12px;box-shadow:0 6px 24px rgba(16,24,40,.08)}
+    h1{margin:0 0 8px;font-size:20px}
+    p.lead{margin:0 0 18px;color:#374151}
+    textarea{width:100%;min-height:120px;padding:10px;border-radius:8px;border:1px solid #e5e7eb;font-size:14px;resize:vertical}
+    .row{display:flex;gap:8px;align-items:center;margin-top:12px}
+    button{background:#2563eb;color:white;border:none;padding:10px 14px;border-radius:8px;cursor:pointer}
+    button.secondary{background:#f3f4f6;color:#111827}
+    .result{margin-top:16px;padding:12px;border-radius:8px;background:#f9fafb;border:1px solid #e5e7eb}
+    .hint{color:#6b7280;font-size:13px}
+    .copied{color:green;font-weight:600}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Provide information</h1>
+    <p class="lead">Enter the information you'd like to share below. When you click Send, your input will be copied to the clipboard so you can paste it into the chat.</p>
+
+    <label for="input" class="hint">Your response</label>
+    <textarea id="input" placeholder="Type your answer here..."></textarea>
+
+    <div class="row">
+      <button id="submit">Send</button>
+      <button id="clear" class="secondary">Clear</button>
+      <div style="margin-left:auto;color:#6b7280;font-size:13px">Local only — nothing leaves this page automatically</div>
+    </div>
+
+    <div id="out" style="display:none" class="result">
+      <strong>Ready to paste</strong>
+      <div id="receivedText" style="white-space:pre-wrap;margin-top:8px"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+        <button id="copy">Copy again</button>
+        <button id="edit" class="secondary">Edit</button>
+        <div id="copiedNotice" style="margin-left:8px;color:green;display:none">Copied to clipboard — paste into the chat</div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const input = document.getElementById('input');
+    const submit = document.getElementById('submit');
+    const clear = document.getElementById('clear');
+    const out = document.getElementById('out');
+    const receivedText = document.getElementById('receivedText');
+    const copy = document.getElementById('copy');
+    const edit = document.getElementById('edit');
+    const copiedNotice = document.getElementById('copiedNotice');
+
+    async function showOutput(value) {
+      receivedText.textContent = value;
+      out.style.display = 'block';
+      try {
+        await navigator.clipboard.writeText(value);
+        copiedNotice.style.display = 'inline';
+      } catch (err) {
+        copiedNotice.textContent = 'Auto-copy unavailable. Use the Copy button.';
+        copiedNotice.style.display = 'inline';
+      }
+    }
+
+    submit.addEventListener('click', () => {
+      const value = input.value.trim();
+      if (!value) {
+        alert('Please enter something before sending.');
+        input.focus();
+        return;
+      }
+      showOutput(value);
+      console.log('User input:', value);
+    });
+
+    clear.addEventListener('click', () => {
+      input.value = '';
+      input.focus();
+    });
+
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(receivedText.textContent);
+        copiedNotice.textContent = 'Copied to clipboard — paste into the chat';
+        copiedNotice.style.display = 'inline';
+        copy.textContent = 'Copied!';
+        setTimeout(() => (copy.textContent = 'Copy again'), 1200);
+      } catch (err) {
+        alert('Copy failed: ' + err);
+      }
+    });
+
+    edit.addEventListener('click', () => {
+      out.style.display = 'none';
+      input.focus();
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
+        submit.click();
+      }
+    });
+  </script>
+</body>
+</html>

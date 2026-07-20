@@ -5,9 +5,15 @@
  * (e.g. "bold bright_cyan", "grey62") — server/ui_builder.py builds them
  * assuming a Rich/Textual console on the other end. ui/app.py gets that
  * for free; a DOM-based renderer (desktop/renderer.js) doesn't, so this
- * is the one place a Rich style string is turned into CSS, built off the
- * same ../spec.json richColors table Python never needs (Rich renders
- * its own style strings natively).
+ * is the one place a Rich style string is turned into CSS.
+ *
+ * The color table isn't required from ../spec.json here — it's injected
+ * via setRichColors(), called once with the `richColors` field of the
+ * server's /ui/spec response (see wire/routes.py's ui_spec()). Nothing
+ * in this file reads a local file or bundles server config: it's pure
+ * interpreter code, the one thing that does have to ship with the
+ * client (there's no way to "fetch" the ability to parse a string), but
+ * the data it interprets against always comes from the live connection.
  *
  * Deliberately approximate, not a full Rich-compatible parser: covers
  * every color/modifier actually used by service/ui_builder.py plus a
@@ -18,7 +24,12 @@
  * default styling instead of breaking the renderer.
  */
 
-const { RICH_COLORS } = require('./index');
+let richColors = {};
+
+/** Called once with /ui/spec's `richColors` field before any node renders. */
+function setRichColors(colors) {
+  richColors = colors || {};
+}
 
 function greyHex(percent) {
   const clamped = Math.max(0, Math.min(100, percent));
@@ -31,7 +42,7 @@ function colorToHex(name) {
   if (!name) return null;
   const greyMatch = /^gr[ae]y(\d{1,3})$/.exec(name);
   if (greyMatch) return greyHex(parseInt(greyMatch[1], 10));
-  return RICH_COLORS[name] || null;
+  return richColors[name] || null;
 }
 
 /** styleString -> a plain object of camelCase CSS properties. */
@@ -72,4 +83,4 @@ function applyRichStyle(el, styleString) {
   }
 }
 
-module.exports = { parseRichStyle, applyRichStyle, colorToHex };
+module.exports = { parseRichStyle, applyRichStyle, colorToHex, setRichColors };

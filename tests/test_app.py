@@ -34,6 +34,7 @@ from service.ui_builder import COMMANDS
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
+    ShowUiPipeline,
     SlowPipeline,
     StubPipeline,
     ToolCallingPipeline,
@@ -98,6 +99,20 @@ def footer_placeholder(app: AgentApp) -> str:
 
 def modal_visible(app: AgentApp) -> bool:
     return "modal" in app._widgets and app._modal_slot.display
+
+
+def agent_ui_panel(app: AgentApp):
+    """The one content-entry kind whose panel is a *container's own*
+    border (Textual's `border_title`, set directly on a Vertical/
+    Horizontal widget by _build()'s container branch) rather than a
+    Rich Panel wrapped inside a Static — every other panel (answer,
+    error) sets a Rich Panel's title, invisible to `.border_title`, so
+    this filter matches only a show_ui result. None if there isn't one."""
+    content = app._widgets["content"]
+    for child in content.children:
+        if getattr(child, "border_title", None):
+            return child
+    return None
 
 
 def connection_status_text(app: AgentApp) -> str:
@@ -798,6 +813,69 @@ class TestResumeScrollsToEnd(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.2)
                 content = app._widgets["content"]
                 self.assertTrue(content.is_vertical_scroll_end)
+
+
+class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
+    """The agent-driven UI tool (tool/ui.py) end to end: a stub pipeline
+    calls it exactly the way the real tool does (via core.ui_context —
+    see ShowUiPipeline), through the real wire protocol, into a real
+    mounted AgentApp. Verifies the whole chain: tool -> ui_context ->
+    Room.show_ui -> service/ui_builder.agent_ui_node -> ui.update op ->
+    AgentApp._build()'s new container-panel branch."""
+
+    async def test_show_ui_renders_a_bordered_panel_with_every_block_kind(self):
+        async with running_server(ShowUiPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+
+                app.query_one("#footer-input").focus()
+                await pilot.press(*"show-me")
+                await pilot.press("enter")
+                await wait_until(lambda: agent_ui_panel(app) is not None)
+
+                panel = agent_ui_panel(app)
+                self.assertEqual(panel.border_title, "Comparison")
+                # The panel's own blocks are Static widgets *nested inside*
+                # this container, not direct #content children — log_text()
+                # only walks direct children (right for every other content
+                # kind, which are flat Statics), so this queries the panel
+                # itself, recursively, instead.
+                text = "\n".join(_plain(_static_renderable(w)) for w in panel.query(Static))
+                self.assertIn("intro line", text)
+                self.assertIn("A", text)  # table header
+                self.assertIn("1", text)  # table cell
+                self.assertIn("Recommended", text)  # facts label
+                self.assertIn("pnpm", text)  # facts value
+                self.assertIn("x", text)  # list item
+                self.assertIn("bold", text)  # markdown block, rendered plain
+
+                await wait_until(lambda: "header-status" not in app._widgets)
+                self.assertIn("shown: Shown to the user.", log_text(app))
+
+    async def test_show_ui_quick_reply_click_submits_a_prompt(self):
+        async with running_server(ShowUiPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+
+                app.query_one("#footer-input").focus()
+                await pilot.press(*"show-me-with-replies")
+                await pilot.press("enter")
+                await wait_until(lambda: agent_ui_panel(app) is not None)
+
+                panel = agent_ui_panel(app)
+                buttons = list(panel.query(Button))
+                self.assertEqual([b.label.plain for b in buttons], ["Option A", "Option B"])
+
+                await wait_until(lambda: "header-status" not in app._widgets)
+                await pilot.click(f"#{buttons[0].id}")
+                await wait_until(lambda: "stub answer to: Option A" in log_text(app))
+                # The clicked button's own label round-tripped as an
+                # ordinary user message too — clicking a quick reply is
+                # meant to be indistinguishable from typing and sending
+                # that same text.
+                self.assertIn("> Option A", log_text(app))
 
 
 if __name__ == "__main__":

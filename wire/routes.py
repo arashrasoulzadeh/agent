@@ -14,6 +14,7 @@ import logging
 from dataclasses import asdict
 from typing import Any
 
+from components import load_spec
 from core import settings
 from service import rooms, ui_builder
 from service.rooms import CannotRemovePrimaryProject
@@ -47,6 +48,22 @@ async def session_prompt(transport: Transport, data: dict) -> dict:
     No room needed, same precedent as /session/create's own no-room
     request."""
     return {"text": "Project path", "default": "."}
+
+
+async def ui_spec(transport: Transport, data: dict) -> dict:
+    """The one config every generic renderer (ui/app.py,
+    desktop/renderer.js) needs before it can draw anything client-local:
+    style tokens, exit words, reply placeholders, the spinner frames, the
+    connection-state labels, and the Rich color table a DOM renderer has
+    to translate to CSS. Fetched fresh from components/spec.json on every
+    call (not a module-level cache) rather than bundled into either
+    client's own install — a style token added here, or an exit word
+    changed, reaches every connected client on its next connect with no
+    client code change, no client rebuild, and no client redeploy. No
+    room needed, same precedent as /session/prompt and /settings/list:
+    this isn't per-room state, it's process-wide.
+    """
+    return load_spec()
 
 
 async def session_create(transport: Transport, data: dict) -> dict:
@@ -235,6 +252,10 @@ async def ui_event(transport: Transport, data: dict) -> dict:
         await _dispatch_option_click(transport, room, component_id)
         return {"accepted": True}
 
+    if component_id.startswith("quick-") and event == "click":
+        await _dispatch_quick_reply(transport, room, component_id)
+        return {"accepted": True}
+
     if component_id.startswith("setting-") and event == "submit":
         await _dispatch_setting_submit(transport, room, component_id, value)
         return {"accepted": True}
@@ -318,6 +339,26 @@ async def _dispatch_option_click(
     await reply(transport, {"room": room.id, "text": value})
 
 
+async def _dispatch_quick_reply(
+    transport: Transport, room: "rooms.Room", component_id: str
+) -> None:
+    """A show_ui quick-reply button click — unlike opt-N above (which
+    only ever resolves against the *one* currently pending ask()
+    question), quick_reply_labels is never cleared, so a button from
+    several turns back in the transcript's own scrollback stays
+    clickable — see Room.quick_reply_labels's own docstring for why.
+    Submits the button's label as an ordinary prompt, exactly as if the
+    user had typed and sent it themselves; silently ignored while a
+    turn is already running, same as an ordinary footer-input submit
+    (_dispatch_footer_submit above) in that state."""
+    label = room.quick_reply_labels.get(component_id)
+    if label is None:
+        raise ProtocolError(f"unknown quick reply: {component_id!r}")
+    if room.turn_active:
+        return
+    await prompt(transport, {"room": room.id, "text": label})
+
+
 async def _dispatch_setting_submit(
     transport: Transport, room: "rooms.Room", component_id: str, value: str
 ) -> None:
@@ -350,6 +391,7 @@ def _require_room(data: dict) -> "rooms.Room":
 
 ROUTES: dict[str, Any] = {
     "/session/prompt": session_prompt,
+    "/ui/spec": ui_spec,
     "/session/create": session_create,
     "/session/resume": session_resume,
     "/prompt": prompt,

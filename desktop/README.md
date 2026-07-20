@@ -13,10 +13,15 @@ generic renderers of the same `Node`/`UIOp` tree.
 
 No framework, no bundler — plain Electron + vanilla DOM APIs, so
 startup and interaction latency stay close to Electron's own floor.
-`components/js/` (see [`../components/`](../components/)) is the one
-piece shared with the CLI/server side: the UI vocabulary (style tokens,
-exit words, the spinner/connection-state constants) both sides read
-from the same `components/spec.json`.
+This client's own local UI vocabulary — style tokens, exit words, the
+spinner/connection-state constants, the Rich color table — isn't
+bundled here: `renderer.js` fetches it live from the server (`/ui/spec`,
+the first request it makes, before `/session/prompt`) instead of
+reading a local copy of `components/spec.json`. `components/js/`
+(see [`../components/`](../components/)) is the one thing this app
+shares with the CLI/server side, and it's interpreter code only, not
+data — the Rich-style-string → CSS parser `preload.js` exposes to
+`renderer.js`.
 
 ## Run
 
@@ -48,9 +53,10 @@ bottom, `/settings` for the settings screen, `exit`/`quit`/`q` to close.
 main.js       Electron main process — one window, a folder-picker IPC
               handler, and safe external-link opening. Never talks to
               the agent server itself.
-preload.js    contextBridge: exposes components/js/'s shared vocabulary,
-              AGENT_WS_HOST/PORT, and the folder picker to the renderer.
-              (sandbox: false — see main.js's comment for why.)
+preload.js    contextBridge: exposes components/js/richStyle.js's parser
+              (not data — see this file's own docstring), AGENT_WS_HOST/
+              PORT, the folder picker, and clipboard writes to the
+              renderer. (sandbox: false — see main.js's comment for why.)
 index.html    The page shell: a start screen, the mount point for the
               server's root tree, and a reserved modal overlay.
 renderer.js   The generic renderer itself — connects, requests/applies
