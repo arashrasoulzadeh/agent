@@ -28,9 +28,9 @@ from pathlib import Path
 from rich.console import Console
 from textual.widgets import Button, Input, OptionList, Static
 
+from actions import ACTIONS
 from core import settings
 from service import rooms
-from service.ui_builder import COMMANDS
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
@@ -546,9 +546,10 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
     shown while the footer input's first token is an ambiguous or
     incomplete command prefix, navigable with the keyboard or mouse,
     and never confused with a real chat message or command submission.
-    Its data comes from service/ui_builder.py's COMMANDS, sent once as
-    part of the initial tree — COMMANDS is imported directly here as
-    the source of truth for what should be listed."""
+    Its data comes from actions.ACTIONS (core/action.py, auto-discovered
+    from actions/), sent once as part of the initial tree — ACTIONS is
+    imported directly here as the source of truth for what should be
+    listed."""
 
     async def test_shows_every_command_on_bare_slash(self):
         async with running_server(StubPipeline) as uri:
@@ -565,7 +566,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 ids = [
                     popup.get_option_at_index(i).id for i in range(popup.option_count)
                 ]
-                self.assertEqual(ids, [c[0] for c in COMMANDS])
+                self.assertEqual(ids, list(ACTIONS.keys()))
                 self.assertEqual(popup.highlighted, 0)
 
     async def test_filters_to_matching_prefix(self):

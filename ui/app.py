@@ -37,7 +37,7 @@ import logging
 import math
 import re
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 import websockets
 from rich import box
@@ -61,6 +61,19 @@ from textual.widgets.option_list import Option
 # code change here — see components/__init__.py's own docstring for the
 # full "one spec, one place" rationale this mirrors on the wire instead
 # of at import time.
+
+
+class _CommandOption(NamedTuple):
+    """One command-popup row's data — actions.ACTIONS, over the wire
+    via service/ui_builder.py's command_list_node(), one per attached
+    "command-<name>" text node's props. `expansion` is only present for
+    a "pre_prompt"/"post_prompt" kind action (core/action.py); None for
+    "ui"/"action"."""
+
+    value: str
+    text: str
+    kind: str
+    expansion: str | None
 
 
 def _estimate_tokens(text: str) -> int:
@@ -258,7 +271,7 @@ class AgentApp(App):
         self._node_type: dict[str, str] = {}
         self._modal_slot: Vertical | None = None
         self._token_hint: Static | None = None
-        self._command_options: list[tuple[str, str]] = []
+        self._command_options: list[_CommandOption] = []
         self._connection_state = "connecting"
         # Populated by _connect()'s /ui/spec fetch, before anything else
         # runs — see this module's top-of-file comment.
@@ -608,11 +621,16 @@ class AgentApp(App):
             # never re-fetched or re-sent per keystroke.
             widget = OptionList(id=node_id)
             self._command_options = [
-                (c["props"]["value"], c["props"]["text"])
+                _CommandOption(
+                    c["props"]["value"],
+                    c["props"]["text"],
+                    c["props"].get("kind", "action"),
+                    c["props"].get("expansion"),
+                )
                 for c in node.get("children", [])
             ]
-            for value, text in self._command_options:
-                widget.add_option(Option(text, id=value))
+            for option in self._command_options:
+                widget.add_option(Option(option.text, id=option.value))
             widget.display = props.get("display", True)
         elif node_type == "list":  # kind == "log" — the content transcript
             children = [self._build(c) for c in node.get("children", [])]
@@ -696,18 +714,36 @@ class AgentApp(App):
             return
         reply_mode = footer_input.placeholder in self._ui_spec["replyPlaceholders"]
         first_token = value.split(" ", 1)[0]
-        matches = [c for c in self._command_options if c[0].startswith(first_token)]
+        matches = [c for c in self._command_options if c.value.startswith(first_token)]
         exact_and_past_it = (
-            len(matches) == 1 and matches[0][0] == first_token and " " in value
+            len(matches) == 1 and matches[0].value == first_token and " " in value
         )
         if reply_mode or not value.startswith("/") or not matches or exact_and_past_it:
             popup.display = False
             return
         popup.display = True
         popup.clear_options()
-        for command, text in matches:
-            popup.add_option(Option(text, id=command))
+        for option in matches:
+            popup.add_option(Option(option.text, id=option.value))
         popup.highlighted = 0
+
+    def _apply_popup_selection(self, input_widget: Input, command_value: str) -> None:
+        """Completes footer-input for an accepted popup selection —
+        shared by both acceptance paths (Enter, a mouse click). A
+        "pre_prompt"/"post_prompt" action's `expansion` text is spliced
+        in directly, in place of the "/command" token, and nothing more
+        happens here: it's now just live-typed text like anything else
+        in the box, still editable, still backspace-deletable character
+        by character — never a hidden marker riding alongside the real
+        input. A "ui"/"action" kind keeps the previous behavior: the
+        bare "/command " token, left for the user to optionally add
+        arguments to before Enter sends it on to the server."""
+        entry = next((c for c in self._command_options if c.value == command_value), None)
+        if entry is not None and entry.kind in ("pre_prompt", "post_prompt") and entry.expansion:
+            input_widget.value = entry.expansion
+        else:
+            input_widget.value = f"{command_value} "
+        input_widget.cursor_position = len(input_widget.value)
 
     def _accept_command_popup(self, input_widget: Input, value: str) -> bool:
         """If the popup is showing a suggestion and `value` isn't
@@ -718,14 +754,13 @@ class AgentApp(App):
             return False
         if input_widget.placeholder in self._ui_spec["replyPlaceholders"]:
             return False
-        if any(c[0] == value for c in self._command_options):
+        if any(c.value == value for c in self._command_options):
             return False
         if not popup.display or popup.option_count == 0:
             return False
         index = popup.highlighted or 0
         option = popup.get_option_at_index(index)
-        input_widget.value = f"{option.id} "
-        input_widget.cursor_position = len(input_widget.value)
+        self._apply_popup_selection(input_widget, option.id)
         return True
 
     def action_popup_prev(self) -> None:
@@ -768,8 +803,7 @@ class AgentApp(App):
         footer_input = self._widgets.get("footer-input")
         if not isinstance(footer_input, Input):
             return
-        footer_input.value = f"{event.option.id} "
-        footer_input.cursor_position = len(footer_input.value)
+        self._apply_popup_selection(footer_input, event.option.id)
         footer_input.focus()
 
     # ---- forwarding interactions to the server -----------------------------

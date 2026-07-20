@@ -7,6 +7,7 @@ returned shape.
 
 import unittest
 
+from actions import ACTIONS
 from service import ui_builder
 
 
@@ -141,12 +142,27 @@ class TestFooterNodes(unittest.TestCase):
 
 
 class TestCommandListNode(unittest.TestCase):
-    def test_contains_all_four_commands_hidden_by_default(self):
+    def test_contains_every_auto_discovered_action_hidden_by_default(self):
         node = ui_builder.command_list_node()
         self.assertEqual(node.type, "list")
         self.assertFalse(node.props["display"])
         values = [c.props["value"] for c in node.children]
-        self.assertEqual(values, ["/add", "/remove", "/projects", "/settings"])
+        self.assertEqual(values, list(ACTIONS.keys()))
+
+    def test_every_child_carries_its_action_kind(self):
+        node = ui_builder.command_list_node()
+        kinds = {c.props["value"]: c.props["kind"] for c in node.children}
+        self.assertEqual(kinds["/add"], "action")
+        self.assertEqual(kinds["/settings"], "ui")
+        self.assertEqual(kinds["/explain"], "pre_prompt")
+        self.assertEqual(kinds["/tldr"], "post_prompt")
+
+    def test_only_pre_and_post_prompt_actions_carry_an_expansion(self):
+        node = ui_builder.command_list_node()
+        by_value = {c.props["value"]: c.props for c in node.children}
+        self.assertEqual(by_value["/explain"]["expansion"], "Explain step by step: ")
+        self.assertNotIn("expansion", by_value["/add"])
+        self.assertNotIn("expansion", by_value["/settings"])
 
 
 class TestQuestionModalNode(unittest.TestCase):

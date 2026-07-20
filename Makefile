@@ -39,11 +39,13 @@ test: ## Run the full test suite, verbose
 test-quiet: ## Run the full test suite, quiet output
 	$(PYTEST) tests -q
 
-deps-check: ## Verify the agent/ and workspace/ dependency-direction boundaries
+deps-check: ## Verify the agent/, workspace/, and actions/ dependency-direction boundaries
 	@echo "=== agent/ must not import tool/llm/workspace ==="
 	@! grep -rn "^import workspace\|^from workspace\|^import tool\b\|^from tool\b\|^import llm\b\|^from llm\b" agent/ 2>/dev/null
 	@echo "=== workspace/ must not import tool/service ==="
 	@! grep -rn "^import tool\b\|^from tool\b\|^import service\b\|^from service\b" workspace/ 2>/dev/null
+	@echo "=== actions/ must not import service/wire (kept a core/-only leaf, like tool/) ==="
+	@! grep -rn "^import service\b\|^from service\b\|^import wire\b\|^from wire\b" actions/ 2>/dev/null
 	@echo "boundaries clean"
 
 check: lint compile deps-check test-quiet ## Run lint + compile + boundary checks + tests (full verification)

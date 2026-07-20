@@ -248,9 +248,18 @@ function buildTable(props) {
   return wrap;
 }
 
+// Each entry: [value, text, kind, expansion]. `kind`/`expansion` come
+// from actions.ACTIONS via service/ui_builder.py's command_list_node()
+// (core/action.py) — `expansion` is only present for a "pre_prompt"/
+// "post_prompt" kind action.
 function buildOptionsList(node) {
   const popup = el('div', 'node-options-list');
-  commandOptions = (node.children || []).map((c) => [c.props.value, c.props.text]);
+  commandOptions = (node.children || []).map((c) => [
+    c.props.value,
+    c.props.text,
+    c.props.kind || 'action',
+    c.props.expansion || null,
+  ]);
   popup.hidden = node.props.display === false;
   renderCommandOptions(commandOptions, popup);
   return popup;
@@ -259,12 +268,41 @@ function buildOptionsList(node) {
 function renderCommandOptions(matches, popupEl) {
   currentMatches = matches;
   popupEl.innerHTML = '';
-  matches.forEach(([value, text], index) => {
+  matches.forEach(([value, text, kind, expansion], index) => {
     const row = el('div', 'popup-row' + (index === popupHighlighted ? ' highlighted' : ''));
     row.dataset.value = value;
+    row.dataset.kind = kind;
+    if (expansion) row.dataset.expansion = expansion;
     row.textContent = text;
     popupEl.appendChild(row);
   });
+}
+
+// Completes footer-input for an accepted popup selection — shared by
+// both acceptance paths (Enter, a mouse click on a popup row). A
+// "pre_prompt"/"post_prompt" action's expansion text is spliced in
+// directly, in place of the "/command" token, and nothing more happens:
+// it's now just live-typed text like anything else in the box, still
+// editable, still backspace-deletable character by character — never a
+// hidden marker riding alongside the real input. A "ui"/"action" kind
+// keeps the previous behavior: the bare "/command " token, left for the
+// user to optionally add arguments to before Enter sends it on to the
+// server.
+function applyPopupSelection(inputEl, value, kind, expansion) {
+  if ((kind === 'pre_prompt' || kind === 'post_prompt') && expansion) {
+    inputEl.value = expansion;
+  } else {
+    inputEl.value = `${value} `;
+  }
+  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  // Setting .value programmatically never fires a native 'input' event,
+  // so the listeners that normally keep the popup/token-hint in sync
+  // with what's typed (appScreen's 'input' listener, below) never run
+  // on their own here — called explicitly instead, for both this and
+  // the token hint, rather than leaving the popup visibly stale after
+  // a completion until the next real keystroke.
+  updateCommandPopup(inputEl.value);
+  updateTokenHint(inputEl.value);
 }
 
 function highlightPopupRow() {
@@ -509,9 +547,8 @@ function acceptCommandPopup(inputEl, value) {
   if (commandOptions.some(([v]) => v === value)) return false;
   if (popup.hidden || currentMatches.length === 0) return false;
   const index = popupHighlighted || 0;
-  const [cmdValue] = currentMatches[index];
-  inputEl.value = `${cmdValue} `;
-  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  const [cmdValue, , kind, expansion] = currentMatches[index];
+  applyPopupSelection(inputEl, cmdValue, kind, expansion);
   return true;
 }
 
@@ -635,12 +672,9 @@ function handleDelegatedClick(e) {
   if (row) {
     const footerInput = widgets.get('footer-input');
     if (footerInput instanceof HTMLInputElement) {
-      footerInput.value = `${row.dataset.value} `;
+      applyPopupSelection(footerInput, row.dataset.value, row.dataset.kind, row.dataset.expansion);
       footerInput.focus();
-      footerInput.setSelectionRange(footerInput.value.length, footerInput.value.length);
     }
-    const popup = widgets.get('command-popup');
-    if (popup) popup.hidden = true;
     return;
   }
   const button = e.target.closest('button.node-button');

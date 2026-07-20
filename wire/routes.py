@@ -14,6 +14,7 @@ import logging
 from dataclasses import asdict
 from typing import Any
 
+from actions import ACTIONS
 from components import load_spec
 from core import settings
 from service import rooms, ui_builder
@@ -203,23 +204,40 @@ async def settings_update(transport: Transport, data: dict) -> dict:
     return {"settings": settings.list_settings()}
 
 
-_COMMANDS = {"/add", "/remove", "/projects", "/settings"}
+class _RouteActionContext:
+    """The one concrete ActionContext (core/action.py) — wraps a
+    (transport, room) pair and delegates to this module's own route
+    functions (project_add, project_remove, ...) or Room methods, so a
+    "/command" and its equivalent direct route/request stay
+    behaviorally identical by construction, not a parallel copy of the
+    same logic re-derived here."""
 
+    def __init__(self, transport: Transport, room: "rooms.Room") -> None:
+        self._transport = transport
+        self._room = room
 
-def _parse_command(value: str) -> tuple[str, list[str]] | None:
-    """Recognizes only `/add`, `/remove`, `/projects`, `/settings` —
-    anything else (ordinary chat text, a bare "y"/"n" resync reply, an
-    unrelated slash-prefixed typo) returns None and falls through to
-    being sent as an ordinary prompt. Moved here from ui/app.py: which
-    command a submitted line means is now a server decision, matching
-    every other interaction with the server-driven UI."""
-    if not value.startswith("/"):
-        return None
-    parts = value.split()
-    command = parts[0]
-    if command not in _COMMANDS:
-        return None
-    return command, parts[1:]
+    async def add_project(self, path: str, name: str | None) -> None:
+        data: dict[str, str] = {"room": self._room.id, "path": path}
+        if name:
+            data["name"] = name
+        await project_add(self._transport, data)
+
+    async def remove_project(self, name: str) -> None:
+        await project_remove(self._transport, {"room": self._room.id, "name": name})
+
+    async def show_settings(self) -> None:
+        await self._room.push_modal(ui_builder.settings_modal_node(settings.list_settings()))
+
+    async def show_panel(self, title: str | None, blocks: list[dict[str, Any]]) -> None:
+        await self._room.append_content(
+            "agent_ui", title=title, blocks=blocks, quick_replies=[]
+        )
+
+    async def info(self, text: str) -> None:
+        await self._room.append_content("info", text=text)
+
+    def project_list(self) -> list[dict[str, Any]]:
+        return self._room.project_list()
 
 
 async def ui_event(transport: Transport, data: dict) -> dict:
@@ -277,53 +295,21 @@ async def _dispatch_footer_submit(
         await resync(transport, {"room": room.id, "confirm": confirm})
         return
 
-    parsed = _parse_command(value)
-    if parsed is not None:
-        command, args = parsed
-        await _dispatch_command(transport, room, command, args)
+    action = ACTIONS.get(value.split(" ", 1)[0]) if value.startswith("/") else None
+    if action is not None and action.kind in ("ui", "action"):
+        # "pre_prompt"/"post_prompt" actions never reach here — the
+        # client resolves those itself the moment one's accepted from
+        # the popup (see core/action.py's own docstring), so only
+        # "ui"/"action" kinds ever have anything to `run`.
+        args = value.split()[1:]
+        assert action.run is not None  # guaranteed by Action.__post_init__
+        await action.run(_RouteActionContext(transport, room), args)
         return
 
     if room.turn_active or not value:
         return
 
     await prompt(transport, {"room": room.id, "text": value})
-
-
-async def _dispatch_command(
-    transport: Transport, room: "rooms.Room", command: str, args: list[str]
-) -> None:
-    if command == "/projects":
-        await room.append_content("info", text=_projects_info_text(room))
-        return
-    if command == "/add":
-        if not args:
-            await room.append_content("info", text="Usage: /add <path> [name]")
-            return
-        req_data: dict[str, str] = {"path": args[0]}
-        if len(args) > 1:
-            req_data["name"] = args[1]
-        await project_add(transport, {"room": room.id, **req_data})
-        return
-    if command == "/remove":
-        if not args:
-            await room.append_content("info", text="Usage: /remove <name>")
-            return
-        await project_remove(transport, {"room": room.id, "name": args[0]})
-        return
-    if command == "/settings":
-        await room.push_modal(ui_builder.settings_modal_node(settings.list_settings()))
-        return
-
-
-def _projects_info_text(room: "rooms.Room") -> str:
-    projects = room.project_list()
-    if not projects:
-        return "No projects attached."
-    lines = ["Attached projects:"]
-    for p in sorted(projects, key=lambda p: p["name"]):
-        marker = "primary" if p.get("primary") else "secondary"
-        lines.append(f"  {p['name']} ({marker})  {p['path']}")
-    return "\n".join(lines)
 
 
 async def _dispatch_option_click(

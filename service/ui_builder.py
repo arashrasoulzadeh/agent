@@ -28,21 +28,10 @@ job (ui/app.py), not this module's.
 
 from typing import Any
 
+from actions import ACTIONS
 from core.style import ERROR, INFO, MESSAGE, QUESTION, THINK, TOOL
 from core.text import preview
 from models.ui import Node
-
-# The four slash commands' data — moved here from ui/app.py's
-# _COMMAND_HELP. Sent once (see command_list_node/root_tree); the
-# client filters this already-downloaded list locally as the user
-# types, never re-fetching per keystroke (typing stays local — see
-# docs/PROTOCOL.md's UI component protocol section).
-COMMANDS = [
-    ("/add", "/add <path> [name]", "Attach another project to this room"),
-    ("/remove", "/remove <name>", "Detach a project"),
-    ("/projects", "/projects", "List attached projects"),
-    ("/settings", "/settings", "Open the settings screen"),
-]
 
 
 def _text(node_id: str, text: str, style: str) -> Node:
@@ -138,20 +127,33 @@ def footer_input_node(awaiting_reply: bool, awaiting_resync: bool) -> Node:
 
 
 def command_list_node() -> Node:
-    """The 4 slash commands' data, sent once — see this module's
-    COMMANDS docstring above."""
+    """Every auto-discovered `/command` action's data (actions/, via
+    core/action.py's Action + core/action_registry.py's discovery),
+    sent once, in `command_list_node`/`root_tree`'s deterministic
+    import order. The client filters this already-downloaded list
+    locally as the user types, never re-fetching per keystroke (typing
+    stays local — see docs/PROTOCOL.md's UI component protocol
+    section). `kind` (and, for a pre_prompt/post_prompt action, its
+    `expansion` text) rides along in each child's props too — the
+    client needs `kind` to decide, on acceptance, whether to splice
+    `expansion` inline (pre_prompt/post_prompt: pure client-side text
+    editing, see core/action.py) or send the bare "/command " token on
+    to the server to `run` (ui/action)."""
+    children = []
+    for action in ACTIONS.values():
+        props: dict[str, Any] = {
+            "text": f"{action.usage}  —  {action.description}",
+            "value": action.name,
+            "kind": action.kind,
+        }
+        if action.text is not None:
+            props["expansion"] = action.text
+        children.append(Node(type="text", id=f"command-{action.name}", props=props))
     return Node(
         type="list",
         id="command-popup",
         props={"kind": "options", "display": False},
-        children=[
-            Node(
-                type="text",
-                id=f"command-{name}",
-                props={"text": f"{usage}  —  {description}", "value": name},
-            )
-            for name, usage, description in COMMANDS
-        ],
+        children=children,
     )
 
 
