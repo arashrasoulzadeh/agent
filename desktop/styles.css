@@ -1,22 +1,57 @@
+/* Design language: two fonts, one rule. Chrome & branding (the start
+   screen, header labels, buttons, modals) use the UI sans-serif —
+   they're app furniture, not data. The conversation itself — the
+   transcript, the footer command line — stays monospace, the "console"
+   this app is a window onto: paths, tool calls, and code read better
+   fixed-width, and it's the one thread tying this back to ui/app.py's
+   terminal heritage. Prose inside an answer (.markdown-body) is the one
+   deliberate exception within that zone — see its own rule below. */
+
 :root {
-  --bg: #0d1117;
-  --bg-elevated: #161b22;
-  --text: #e6edf3;
-  --text-muted: #8b949e;
-  --border: #30363d;
-  --accent: #58a6ff;
-  --danger: #f85149;
+  --bg: #0a0c11;
+  --bg-elevated: #12151d;
+  --bg-elevated-2: #171b25;
+  --bg-inset: #05070a;
+  --border: #232838;
+  --border-soft: #1a1e29;
+  --text: #e9ecf5;
+  --text-muted: #8b93a8;
+  --text-faint: #565f74;
+  --accent: #7c8cff;
+  --accent-rgb: 124, 140, 255;
+  --accent-2: #22d3ee;
+  --danger: #f87171;
+  --danger-rgb: 248, 113, 113;
+  --success-rgb: 52, 211, 153;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #ffffff;
-    --bg-elevated: #f6f8fa;
-    --text: #1f2328;
-    --text-muted: #57606a;
-    --border: #d0d7de;
-    --accent: #0969da;
-    --danger: #cf222e;
+    --bg: #f7f8fb;
+    --bg-elevated: #ffffff;
+    --bg-elevated-2: #eef0f6;
+    --bg-inset: #eef0f6;
+    --border: #dde1ec;
+    --border-soft: #e7eaf3;
+    --text: #1b2030;
+    --text-muted: #5b6478;
+    --text-faint: #93a0b5;
+    --accent: #5b63f5;
+    --accent-rgb: 91, 99, 245;
+    --accent-2: #0891b2;
+    --danger: #dc2626;
+    --danger-rgb: 220, 38, 38;
+    --success-rgb: 5, 150, 105;
+    --shadow-sm: 0 1px 2px rgba(30, 41, 71, 0.08);
+    --shadow-md: 0 16px 40px -14px rgba(30, 41, 71, 0.25);
   }
 }
 
@@ -27,139 +62,263 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
+  overflow: hidden;
 }
 
 body {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-ui);
   font-size: 14px;
-  line-height: 1.45;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 button { font-family: inherit; }
 
+::selection { background: rgba(var(--accent-rgb), 0.35); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  background-clip: padding-box;
+}
+
 .screen { width: 100vw; height: 100vh; }
 
-/* ---- start screen ---- */
+@keyframes screenIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* The transcript's live-arriving entries get this (see renderer.js's
+   appendNode()) — deliberately *not* applied to the bulk-built initial
+   tree, so a resumed session with a long history mounts instantly
+   instead of every past line animating in at once. */
+.enter { animation: fadeInUp 0.22s ease; }
+
+/* ---- shared brand mark ------------------------------------------------ */
+/* The start screen's badge (below) and #header-title (server-sent text,
+   below) are structurally different — one's static markup, the other's
+   a Node the server builds — but both carry the same gradient identity,
+   so the two screens read as one app despite the different DOM shapes. */
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.1px;
+}
+
+.brand-glyph {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.node-connection-status {
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.node-connection-status[data-state="connected"] { text-shadow: 0 0 10px rgba(var(--success-rgb), 0.45); }
+.node-connection-status[data-state="disconnected"] { text-shadow: 0 0 10px rgba(var(--danger-rgb), 0.4); }
+
+/* ---- start screen -------------------------------------------------- */
+/* Same topbar + scrollable-body skeleton #app-screen uses below, on
+   purpose — swapping between "no session yet" and "session mounted"
+   should read as one continuous app, not a jump cut between two. */
 
 #start-screen {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
 }
 
-/* An ID-selector rule that sets `display` beats the browser's own
-   default `[hidden] { display: none }` (author styles always win over
-   the UA stylesheet) — without this override, setting the `hidden`
-   attribute in JS (mountRoot()) would stop doing anything, and this
-   screen would keep rendering, stacked with #app-screen underneath it. */
 #start-screen[hidden] { display: none; }
 
-.start-card {
-  width: min(560px, 90vw);
-  max-height: 90vh;
+.start-topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.start-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+
+.start-card {
+  width: min(480px, 100%);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 28px 32px;
+  border-radius: var(--radius-lg);
+  padding: 34px 36px;
+  box-shadow: var(--shadow-md);
+  position: relative;
+  overflow: hidden;
+  animation: screenIn 0.25s ease;
 }
 
-.brand {
-  margin: 0 0 22px;
-  font-size: 19px;
-  letter-spacing: 0.5px;
-  color: var(--accent);
+.start-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
-.muted { color: var(--text-muted); }
+.start-state#start-connecting, .start-state#start-error { text-align: center; }
 
-.spinner {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  margin-right: 8px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
+.orbit { position: relative; width: 40px; height: 40px; margin: 6px auto 16px; }
+.orbit span {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 7px; height: 7px;
+  margin: -3.5px;
   border-radius: 50%;
-  vertical-align: middle;
-  animation: spin 0.8s linear infinite;
+  background: var(--accent);
+  animation: orbit 1.3s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+.orbit span:nth-child(2) { background: var(--accent-2); animation-delay: -0.43s; }
+.orbit span:nth-child(3) { background: var(--text-faint); animation-delay: -0.87s; }
+
+@keyframes orbit {
+  0%   { transform: rotate(0deg) translateX(16px) rotate(0deg); opacity: 0.35; }
+  50%  { opacity: 1; }
+  100% { transform: rotate(360deg) translateX(16px) rotate(-360deg); opacity: 0.35; }
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+.muted { color: var(--text-muted); font-size: 13px; }
+
+.error-title { font-weight: 700; color: var(--danger); margin: 2px 0 10px; font-size: 15px; }
 
 .error-text {
-  color: var(--danger);
+  color: var(--text-muted);
   white-space: pre-wrap;
+  font-size: 13px;
+  margin: 0 0 14px;
 }
 
 .code-block {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 12px;
-  margin: 8px 0 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin: 8px 0 18px;
 }
 
 .field-label {
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
 }
 
-.path-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-
+.path-row { display: flex; gap: 8px; margin-bottom: 16px; }
 #start-path { flex: 1 1 auto; }
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   font: inherit;
-  padding: 6px 14px;
-  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg-elevated-2);
   color: var(--text);
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
 }
 
 .btn:hover { border-color: var(--accent); }
+.btn:active { transform: scale(0.97); }
 
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  width: 100%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
   color: #fff;
+  box-shadow: 0 8px 22px -10px rgba(var(--accent-rgb), 0.7);
 }
 
-.btn.primary:hover { filter: brightness(1.08); }
+.btn.primary:hover { filter: brightness(1.07); }
+
+.btn-arrow { transition: transform 0.15s ease; }
+.btn.primary:hover .btn-arrow { transform: translateX(3px); }
 
 input[type="text"], input[type="password"] {
   font: inherit;
-  padding: 6px 10px;
-  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--bg-inset);
   color: var(--text);
   width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-input:focus { outline: none; border-color: var(--accent); }
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+}
 
 .section-title {
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-  margin: 20px 0 8px;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--text-faint);
+  margin: 26px 0 10px;
 }
 
 .rooms-list {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 220px;
+  max-height: 240px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -171,39 +330,40 @@ input:focus { outline: none; border-color: var(--accent); }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated-2);
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.room-path { font-size: 13px; }
-.room-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.room-row:hover { border-color: var(--accent); }
 
-/* ---- mounted app tree ---- */
+.room-path { font-family: var(--font-mono); font-size: 12.5px; }
+.room-meta { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
+
+/* ---- mounted app tree ------------------------------------------------ */
 
 #app-screen {
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
+  animation: screenIn 0.25s ease;
 }
 
-/* Same reasoning as #start-screen[hidden] above — without this,
-   #app-screen (starts `hidden` in index.html, before any session is
-   mounted) would render from launch, stacked with #start-screen. */
 #app-screen[hidden] { display: none; }
 
 .node-container.col { display: flex; flex-direction: column; }
 .node-container.row { display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; }
 
-/* #root is the tree's own outer container (built from the server's
-   root_tree(), id="root") — a flex item of #app-screen like any other
-   node, so by default it's sized to fit its content, not to fill the
-   window. Without an explicit height here, #content's flex:1/overflow
-   below has no bounded parent height to actually scroll within, so the
-   whole app grows to fit the transcript instead of staying a fixed
-   header/footer shell with only the transcript scrolling internally —
-   exactly the "static app" shape this is meant to have. */
+/* #root is the tree's own outer container (the server's root_tree(),
+   id="root") — a flex item of #app-screen like any other node, so by
+   default it's sized to fit its content, not to fill the window.
+   Without this, #content's flex/overflow below has no bounded parent
+   height to actually scroll within, and the whole app grows to fit the
+   transcript instead of staying a fixed header/footer shell with only
+   the transcript scrolling internally. */
 #root {
   flex: 1 1 auto;
   min-height: 0;
@@ -212,35 +372,101 @@ input:focus { outline: none; border-color: var(--accent); }
 #header {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
-  padding: 10px 16px;
-  gap: 2px;
+  padding: 12px 18px;
+  gap: 4px;
 }
 
-#header-title { font-weight: 600; }
+/* The server sends "⚡ AGENT" as one text node — can't split it into a
+   separate glyph badge the way .brand-mark does, so the same gradient
+   identity is applied as a text fill instead. Reads as the same brand
+   mark despite the different markup. */
+#header-title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.15px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 
-.node-connection-status { white-space: pre; font-size: 12px; }
-.header-status { font-size: 12px; }
+#header-tokens, #header-config {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+}
+
+.header-status {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+/* header-tools is a single span-line built server-side; the first span
+   is the "tools" label, every span after it is one tool name — turned
+   into pill chips here purely with CSS, no server or renderer change. */
+#header-tools span:first-child {
+  font-weight: 700;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10px;
+  margin-right: 6px;
+}
+
+#header-tools span:not(:first-child) {
+  display: inline-block;
+  padding: 2px 9px;
+  margin: 2px 4px 2px 0;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
 
 #content {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px;
+  padding: 20px 22px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
+  font-family: var(--font-mono);
+  /* A scroll-shadow: a soft fade at the top/bottom edge whenever
+     there's more transcript to scroll to, gone once you're at that
+     edge. background-attachment: local makes the two "cover" gradients
+     scroll with the content while the two "scroll" gradients (the
+     visible shadow) stay pinned to the viewport. */
+  background:
+    linear-gradient(var(--bg) 30%, rgba(0, 0, 0, 0)) local,
+    linear-gradient(rgba(0, 0, 0, 0), var(--bg) 70%) local,
+    radial-gradient(farthest-side at 50% 0%, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) scroll;
+  background-repeat: no-repeat;
+  background-color: var(--bg);
+  background-size: 100% 28px, 100% 28px, 100% 10px, 100% 10px;
+  background-position: top, bottom, top, bottom;
 }
 
 #footer {
   position: relative;
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+  transition: border-color 0.15s ease;
 }
 
+#footer:focus-within { border-top-color: var(--accent); }
+
 #footer-info {
-  padding: 5px 16px;
-  color: var(--text-muted);
-  font-size: 12px;
+  padding: 6px 22px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 #footer-input {
@@ -249,147 +475,289 @@ input:focus { outline: none; border-color: var(--accent); }
   border: none;
   background: transparent;
   color: var(--text);
-  padding: 11px 16px;
-  font: inherit;
+  padding: 13px 22px;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
 }
 
+#footer-input::placeholder { color: var(--text-faint); }
 #footer-input:focus { outline: none; }
 
-/* ---- transcript text ---- */
+/* ---- transcript text --------------------------------------------------- */
 
 .span-line, .plain-text {
   white-space: pre-wrap;
   word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .node-panel {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+/* An answer's own accent — kept off border-left-color specifically
+   (renderer.js's buildText() only ever sets top/right/bottom inline)
+   so this CSS rule can own the left edge without an inline style
+   fight. Same gradient-top-bar motif as .start-card/#modal below marks
+   this as an "elevated, important" surface — one recurring signature
+   instead of three unrelated treatments. */
+.node-panel:not(.error-panel) {
+  border-left-width: 3px;
+  border-left-color: var(--accent);
+}
+
+.error-panel {
+  border-left-width: 3px;
+  border-left-color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
 }
 
 .node-panel-title {
-  font-size: 11px;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  margin-bottom: 6px;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
 }
 
-.error-panel .node-panel-title { color: var(--danger); }
+/* Prose reads better in the UI sans even inside the mono transcript —
+   the one deliberate exception to "#content is the console zone"
+   (see this file's top comment). Code inside an answer stays mono. */
+.markdown-body {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
 
-.markdown-body h1, .markdown-body h2, .markdown-body h3 { margin: 0.5em 0 0.3em; }
-.markdown-body p { margin: 0.5em 0; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3 { margin: 0.6em 0 0.35em; font-weight: 700; }
+.markdown-body h1 { font-size: 1.25em; }
+.markdown-body h2 { font-size: 1.12em; }
+.markdown-body h3 { font-size: 1.02em; }
+.markdown-body p { margin: 0.55em 0; }
 .markdown-body p:first-child { margin-top: 0; }
 .markdown-body p:last-child { margin-bottom: 0; }
 .markdown-body pre {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px 12px;
+  font-family: var(--font-mono);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
   overflow-x: auto;
+  font-size: 12.5px;
 }
 .markdown-body code {
-  background: var(--bg);
-  padding: 1px 5px;
+  font-family: var(--font-mono);
+  background: var(--bg-inset);
+  padding: 2px 6px;
   border-radius: 4px;
+  font-size: 0.92em;
 }
 .markdown-body pre code { background: none; padding: 0; }
-.markdown-body a { color: var(--accent); }
+
+/* A fenced code block's chrome (language label + copy button) — see
+   renderer.js's renderMarkdown()/highlightCode(). The outer wrap owns
+   the border/background/radius; the inner <pre> (still matched by the
+   base .markdown-body pre rule above) is flattened back to plain so
+   the two don't double up. */
+.markdown-body .code-block-wrap {
+  margin: 0.6em 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+.markdown-body .code-block-wrap pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+.code-block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 6px 5px 12px;
+  background: var(--bg-elevated-2);
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--font-ui);
+}
+.code-lang {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+}
+.code-copy-btn {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.code-copy-btn:hover { border-color: var(--accent); color: var(--text); }
+.code-copy-btn.copied { border-color: rgba(var(--success-rgb), 0.6); color: rgb(var(--success-rgb)); }
+
+/* Best-effort syntax highlighting (highlightCode() in renderer.js) —
+   the same palette family as ui/app.py's own Markdown(code_theme=
+   "dracula"), so code reads the same regardless of which client
+   answered the question. */
+.tok-keyword { color: #ff7ad1; font-weight: 600; }
+.tok-string  { color: #a6e3a1; }
+.tok-comment { color: var(--text-faint); font-style: italic; }
+.tok-number  { color: #f9c66b; }
+.tok-function{ color: #7dcfff; }
+
+.markdown-body a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.35);
+}
+.markdown-body a:hover { border-bottom-color: var(--accent); }
 .markdown-body blockquote {
-  margin: 0.5em 0;
-  padding-left: 10px;
+  margin: 0.6em 0;
+  padding: 2px 0 2px 12px;
   border-left: 3px solid var(--border);
   color: var(--text-muted);
 }
-.markdown-body ul, .markdown-body ol { margin: 0.4em 0; padding-left: 22px; }
+.markdown-body ul, .markdown-body ol { margin: 0.5em 0; padding-left: 24px; }
+.markdown-body li { margin: 0.2em 0; }
 
-/* ---- command popup ---- */
+/* ---- command popup ------------------------------------------------- */
 
 .node-options-list {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  max-height: 180px;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + 8px);
+  max-height: 220px;
   overflow-y: auto;
-  background: var(--bg-elevated);
+  background: var(--bg-elevated-2);
   border: 1px solid var(--border);
-  border-bottom: none;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  animation: fadeInUp 0.12s ease;
 }
 
 .node-options-list[hidden] { display: none; }
 
 .popup-row {
-  padding: 6px 16px;
-  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
   cursor: pointer;
+  transition: background 0.1s ease;
 }
 
 .popup-row.highlighted, .popup-row:hover {
-  background: var(--accent);
-  color: #fff;
+  background: rgba(var(--accent-rgb), 0.16);
 }
 
-/* ---- buttons + modal ---- */
+/* ---- buttons + modal ------------------------------------------------ */
 
 .node-button {
-  padding: 6px 14px;
-  border-radius: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg-elevated-2);
   color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
 }
 
-.node-button:hover { border-color: var(--accent); }
+.node-button:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
+.node-button:active { transform: scale(0.97); }
+
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
 
 #modal-slot {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(5, 7, 10, 0.55);
+  backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 50;
+  animation: scrimIn 0.15s ease;
 }
 
-#modal-slot[hidden] { display: none; }
+#modal-slot[hidden] { display: none; animation: none; }
 
 #modal {
+  position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 22px 26px;
-  min-width: 340px;
+  border-radius: var(--radius-lg);
+  padding: 26px 30px;
+  min-width: 360px;
   max-width: 90vw;
   max-height: 85vh;
   overflow-y: auto;
+  box-shadow: var(--shadow-md);
+  animation: screenIn 0.2s ease;
+}
+
+#modal::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
 #modal .node-container.row {
-  gap: 10px;
-  margin: 8px 0;
+  gap: 12px;
+  margin: 10px 0;
   flex-wrap: nowrap;
+  align-items: center;
 }
 
 #modal .node-container.row .node-text {
   flex: 0 0 auto;
   min-width: 170px;
   color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
 }
 
 #modal .node-container.row input.node-input {
   flex: 1 1 auto;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
-  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  background: var(--bg-inset);
+  font-family: var(--font-mono);
+  font-size: 13px;
 }
 
-#modal-options.node-container.row {
-  justify-content: flex-end;
-  margin-top: 16px;
+#modal .node-container.row input.node-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
-#settings-hint { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+#modal-options.node-container.row { justify-content: flex-end; margin-top: 20px; }
+
+#settings-hint {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  margin-top: 10px;
+  font-family: var(--font-ui);
+}

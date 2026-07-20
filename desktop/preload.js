@@ -12,11 +12,14 @@
  *     components/__init__.py.
  *   - `agentEnv` — where to find the agent server (same
  *     AGENT_WS_HOST/AGENT_WS_PORT env vars wire/config.py reads).
- *   - `agentNative` — the one native capability the renderer needs that
- *     the web platform can't give it (a real folder picker).
+ *   - `agentNative` — native capabilities the renderer needs that the
+ *     web platform can't give it: a real folder picker, and clipboard
+ *     writes (Electron's `clipboard` module, not the web Clipboard API —
+ *     more reliable than `navigator.clipboard` from a `file://`-loaded
+ *     page, and needs no permission prompt).
  */
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, clipboard } = require('electron');
 const components = require('../components/js/index.js');
 const { parseRichStyle } = require('../components/js/richStyle.js');
 
@@ -32,4 +35,5 @@ contextBridge.exposeInMainWorld('agentEnv', {
 
 contextBridge.exposeInMainWorld('agentNative', {
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  copyText: (text) => clipboard.writeText(text),
 });

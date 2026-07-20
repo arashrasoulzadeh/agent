@@ -60,7 +60,15 @@ def _render_text(props: dict[str, Any]):
     plain text+style, multi-span text, markdown, and either wrapped in
     a Panel or not."""
     if props.get("format") == "markdown":
-        renderable = Markdown(props.get("text", ""))
+        # "dracula" pairs the code-fence syntax highlighting this app
+        # already got for free from Rich/Pygments with the same
+        # pink/green/amber/cyan token palette desktop/'s own hand-rolled
+        # highlighter uses (desktop/styles.css's .tok-* rules) — one
+        # color language for code across both clients, not two that
+        # happen to clash.
+        renderable = Markdown(
+            props.get("text", ""), code_theme="dracula", inline_code_theme="dracula"
+        )
     elif "spans" in props:
         renderable = Text()
         for span in props["spans"]:

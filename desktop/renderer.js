@@ -57,6 +57,10 @@ function makeId() {
 // answer can't inject arbitrary HTML. Covers what LLM answers actually
 // use: paragraphs, headings, code (fenced + inline), bold/italic, links
 // (http(s) only), lists, and blockquotes. Not a full CommonMark parser.
+// A fenced code block additionally gets a language label + one-click
+// copy (handleDelegatedClick, below) and best-effort syntax
+// highlighting (highlightCode, below) — see that function's own
+// docstring for what it is and isn't.
 
 function escapeHtml(text) {
   return text
@@ -64,6 +68,86 @@ function escapeHtml(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ---- a small, honest syntax highlighter --------------------------------
+// Not a real tokenizer/parser (no per-language grammar, no nesting rules)
+// — one shared regex per language classifying comments/strings/numbers/
+// identifiers by pattern alone. Good enough to make a code block
+// scannable; wrong on edge cases a real lexer wouldn't be (e.g. a `#`
+// inside a JS regex literal). ui/app.py gets real Pygments highlighting
+// for free from Rich; this is what closes that gap for desktop without
+// pulling in a highlighting library and its grammar files.
+
+const LANG_ALIASES = {
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', py3: 'python',
+  sh: 'bash', shell: 'bash', zsh: 'bash', bash: 'bash', console: 'bash',
+  rb: 'ruby',
+  golang: 'go',
+  rs: 'rust',
+  yml: 'yaml',
+  c: 'c', h: 'c', cpp: 'c', 'c++': 'c', cc: 'c',
+};
+
+const LANG_KEYWORDS = {
+  python: ['def', 'return', 'if', 'elif', 'else', 'for', 'while', 'in', 'not', 'and', 'or', 'import', 'from', 'as', 'class', 'try', 'except', 'finally', 'with', 'lambda', 'yield', 'pass', 'break', 'continue', 'None', 'True', 'False', 'self', 'raise', 'async', 'await', 'global', 'nonlocal', 'is', 'del'],
+  javascript: ['function', 'return', 'if', 'else', 'for', 'while', 'in', 'of', 'const', 'let', 'var', 'class', 'try', 'catch', 'finally', 'import', 'export', 'from', 'as', 'new', 'this', 'typeof', 'instanceof', 'null', 'undefined', 'true', 'false', 'async', 'await', 'yield', 'switch', 'case', 'break', 'continue', 'default', 'extends', 'super', 'static', 'throw', 'delete', 'void'],
+  bash: ['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'do', 'done', 'case', 'esac', 'function', 'return', 'local', 'export', 'in', 'echo', 'exit', 'set'],
+  json: ['true', 'false', 'null'],
+  go: ['func', 'return', 'if', 'else', 'for', 'range', 'package', 'import', 'var', 'const', 'type', 'struct', 'interface', 'map', 'chan', 'go', 'defer', 'select', 'switch', 'case', 'default', 'break', 'continue', 'nil', 'true', 'false'],
+  rust: ['fn', 'return', 'if', 'else', 'for', 'while', 'loop', 'match', 'let', 'mut', 'const', 'struct', 'enum', 'impl', 'trait', 'pub', 'use', 'mod', 'self', 'Self', 'true', 'false', 'None', 'Some', 'Ok', 'Err', 'async', 'await'],
+  sql: ['select', 'from', 'where', 'insert', 'into', 'values', 'update', 'set', 'delete', 'create', 'table', 'drop', 'alter', 'join', 'left', 'right', 'inner', 'outer', 'on', 'group', 'by', 'order', 'having', 'limit', 'and', 'or', 'not', 'null', 'as', 'distinct'],
+  ruby: ['def', 'end', 'return', 'if', 'elsif', 'else', 'unless', 'for', 'while', 'in', 'do', 'class', 'module', 'require', 'nil', 'true', 'false', 'self', 'yield', 'begin', 'rescue', 'ensure', 'raise'],
+  c: ['int', 'char', 'float', 'double', 'void', 'struct', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue', 'static', 'const', 'sizeof', 'typedef', 'enum', 'union', 'unsigned', 'signed', 'null', 'NULL'],
+};
+LANG_KEYWORDS.typescript = [...LANG_KEYWORDS.javascript, 'interface', 'type', 'implements', 'enum', 'namespace', 'public', 'private', 'protected', 'readonly', 'is', 'declare'];
+
+const LANG_COMMENTS = {
+  python: '#.*', bash: '#.*', ruby: '#.*', yaml: '#.*',
+  javascript: '//.*|/\\*[\\s\\S]*?\\*/',
+  typescript: '//.*|/\\*[\\s\\S]*?\\*/',
+  go: '//.*|/\\*[\\s\\S]*?\\*/',
+  rust: '//.*|/\\*[\\s\\S]*?\\*/',
+  c: '//.*|/\\*[\\s\\S]*?\\*/',
+  css: '/\\*[\\s\\S]*?\\*/',
+  sql: '--.*',
+  html: '<!--[\\s\\S]*?-->',
+  xml: '<!--[\\s\\S]*?-->',
+};
+
+function highlightCode(code, langTag) {
+  const language = LANG_ALIASES[langTag] || langTag;
+  const keywords = new Set(LANG_KEYWORDS[language] || []);
+  const commentSource = LANG_COMMENTS[language];
+  if (!keywords.size && !commentSource) return escapeHtml(code); // unrecognized language: still safe, just plain
+
+  const combined = new RegExp(
+    `(?<comment>${commentSource || '(?!)'})` +
+      `|(?<string>"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|\`(?:[^\`\\\\]|\\\\.)*\`)` +
+      `|(?<number>\\b\\d+(?:\\.\\d+)?\\b)` +
+      `|(?<word>[A-Za-z_$][A-Za-z0-9_$]*)`,
+    'g'
+  );
+
+  const out = [];
+  let lastIndex = 0;
+  let match;
+  while ((match = combined.exec(code)) !== null) {
+    if (match.index > lastIndex) out.push(escapeHtml(code.slice(lastIndex, match.index)));
+    const { comment, string, number, word } = match.groups;
+    const token = match[0];
+    if (comment !== undefined) out.push(`<span class="tok-comment">${escapeHtml(token)}</span>`);
+    else if (string !== undefined) out.push(`<span class="tok-string">${escapeHtml(token)}</span>`);
+    else if (number !== undefined) out.push(`<span class="tok-number">${escapeHtml(token)}</span>`);
+    else if (word !== undefined && keywords.has(word)) out.push(`<span class="tok-keyword">${escapeHtml(token)}</span>`);
+    else if (word !== undefined && code[combined.lastIndex] === '(') out.push(`<span class="tok-function">${escapeHtml(token)}</span>`);
+    else out.push(escapeHtml(token));
+    lastIndex = combined.lastIndex;
+  }
+  out.push(escapeHtml(code.slice(lastIndex)));
+  return out.join('');
 }
 
 function renderInlineMarkdown(text) {
@@ -95,13 +179,23 @@ function renderMarkdown(text) {
 
     if (line.trim().startsWith('```')) {
       closeList();
+      const langTag = line.trim().slice(3).trim().toLowerCase();
       const codeLines = [];
       i += 1;
       while (i < lines.length && !lines[i].trim().startsWith('```')) {
         codeLines.push(lines[i]);
         i += 1;
       }
-      html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      const code = codeLines.join('\n');
+      html.push(
+        '<div class="code-block-wrap">' +
+          '<div class="code-block-bar">' +
+          `<span class="code-lang">${escapeHtml(langTag || 'text')}</span>` +
+          '<button type="button" class="code-copy-btn">Copy</button>' +
+          '</div>' +
+          `<pre><code>${highlightCode(code, langTag)}</code></pre>` +
+          '</div>'
+      );
       i += 1;
       continue;
     }
@@ -243,7 +337,16 @@ function buildText(props) {
     const [padV, padH] = props.padding || [0, 0];
     panel.style.padding = `${padV * 6 + 6}px ${padH * 8 + 10}px`;
     const borderColor = parseRichStyle(props.border_style || '').color;
-    if (borderColor) panel.style.borderColor = borderColor;
+    if (borderColor) {
+      // Left edge deliberately untouched — styles.css's
+      // .node-panel:not(.error-panel) rule owns it (an accent stripe
+      // marking "elevated surface"); setting all four sides here would
+      // win over that CSS rule via inline-style precedence and flatten
+      // every panel back to a single flat border color.
+      panel.style.borderTopColor = borderColor;
+      panel.style.borderRightColor = borderColor;
+      panel.style.borderBottomColor = borderColor;
+    }
     if (props.panel_title) {
       const title = el('div', 'node-panel-title');
       title.textContent = props.panel_title;
@@ -289,6 +392,7 @@ function highlightPopupRow() {
 function renderConnectionStatus(node_el) {
   const [label, styleName] = CONNECTION_STATES[connectionState];
   node_el.textContent = `  ${label}`;
+  node_el.dataset.state = connectionState; // styles.css's connected/disconnected glow
   applyRichStyleTo(node_el, styleName);
 }
 
@@ -296,6 +400,12 @@ function setConnectionStatus(state) {
   connectionState = state;
   const node_el = widgets.get('connection-status');
   if (node_el) renderConnectionStatus(node_el);
+  // The start screen has its own persistent status readout in the same
+  // spot #connection-status occupies once a session is mounted (see
+  // index.html's #start-topbar-status) — painting both from one call
+  // keeps the two screens' chrome visually continuous across the swap.
+  const startTopbarStatus = document.getElementById('start-topbar-status');
+  if (startTopbarStatus) renderConnectionStatus(startTopbarStatus);
 }
 
 function renderHeaderStatus(node_el) {
@@ -395,7 +505,13 @@ function replaceNode(target, node) {
 function appendNode(target, node) {
   const container = widgets.get(target);
   if (!container) return;
-  container.appendChild(build(node));
+  const entryEl = build(node);
+  // Only a live-arriving entry animates in (styles.css's .enter) — the
+  // initial tree's bulk-built children (build()'s own recursive pass,
+  // never appendNode) mount instantly, so a resumed session with a long
+  // transcript doesn't replay every past line fading in at once.
+  entryEl.classList.add('enter');
+  container.appendChild(entryEl);
   if (target === 'content') container.scrollTop = container.scrollHeight;
 }
 
@@ -568,6 +684,21 @@ appScreen.addEventListener('input', (e) => {
 });
 
 function handleDelegatedClick(e) {
+  const copyBtn = e.target.closest('.code-copy-btn');
+  if (copyBtn) {
+    // textContent (not the highlighted innerHTML) — the .tok-* spans
+    // wrap runs of the same text without adding/removing characters,
+    // so this always yields the exact original code, highlighted or not.
+    const code = copyBtn.closest('.code-block-wrap').querySelector('code').textContent;
+    window.agentNative.copyText(code);
+    copyBtn.textContent = 'Copied';
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = 'Copy';
+      copyBtn.classList.remove('copied');
+    }, 1200);
+    return;
+  }
   const row = e.target.closest('.popup-row');
   if (row) {
     const footerInput = widgets.get('footer-input');
@@ -791,12 +922,14 @@ startRetry.addEventListener('click', () => {
 
 async function main() {
   showStartState('connecting');
+  setConnectionStatus('connecting');
   const url = `ws://${window.agentEnv.wsHost}:${window.agentEnv.wsPort}`;
 
   let socket;
   try {
     socket = await connectSocket(url);
   } catch (err) {
+    setConnectionStatus('disconnected');
     showStartError(
       `Could not reach the agent server at ${url}.\n\nStart one in a terminal first, then retry.`
     );

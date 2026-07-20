@@ -11,35 +11,44 @@
   <!-- Pre-connection screen: reachability check, then either a path
        form (mirrors cli.py's blocking "Project path" prompt, server-
        supplied via /session/prompt) or a resume picker (/rooms/list).
-       Hidden once a room's root tree is mounted. -->
+       Hidden once a room's root tree is mounted. Deliberately mirrors
+       #app-screen's own topbar+scrollable-body skeleton (see styles.css)
+       so swapping between the two never feels like a different app. -->
   <section id="start-screen" class="screen">
-    <div class="start-card">
-      <h1 class="brand">⚡ AGENT</h1>
+    <div class="start-topbar">
+      <span class="brand-mark"><span class="brand-glyph" aria-hidden="true">⚡</span>Agent</span>
+      <span id="start-topbar-status" class="node-connection-status"></span>
+    </div>
 
-      <div id="start-connecting" class="start-state">
-        <p class="muted"><span class="spinner" aria-hidden="true"></span> connecting to the agent server…</p>
-      </div>
+    <div class="start-body">
+      <div class="start-card">
+        <div id="start-connecting" class="start-state">
+          <div class="orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+          <p class="muted">Reaching the agent server…</p>
+        </div>
 
-      <div id="start-error" class="start-state" hidden>
-        <p class="error-text" id="start-error-text"></p>
-        <p class="muted">Start one in a terminal, then retry:</p>
-        <pre class="code-block">agent-server</pre>
-        <button id="start-retry" type="button" class="btn primary">Retry</button>
-      </div>
+        <div id="start-error" class="start-state" hidden>
+          <p class="error-title">Can't reach the agent server</p>
+          <p class="error-text" id="start-error-text"></p>
+          <p class="muted">Start one in a terminal, then retry:</p>
+          <pre class="code-block">agent-server</pre>
+          <button id="start-retry" type="button" class="btn primary">Retry</button>
+        </div>
 
-      <div id="start-ready" class="start-state" hidden>
-        <form id="start-form">
-          <label id="start-path-label" class="field-label" for="start-path">Project path</label>
-          <div class="path-row">
-            <input id="start-path" type="text" autocomplete="off" spellcheck="false" />
-            <button id="start-browse" type="button" class="btn">Browse…</button>
+        <div id="start-ready" class="start-state" hidden>
+          <form id="start-form">
+            <label id="start-path-label" class="field-label" for="start-path">Project path</label>
+            <div class="path-row">
+              <input id="start-path" type="text" autocomplete="off" spellcheck="false" />
+              <button id="start-browse" type="button" class="btn">Browse…</button>
+            </div>
+            <button id="start-submit" type="submit" class="btn primary">Open project<span class="btn-arrow" aria-hidden="true">→</span></button>
+          </form>
+
+          <div id="start-rooms-wrap" hidden>
+            <h2 class="section-title">Resume a session</h2>
+            <ul id="start-rooms" class="rooms-list"></ul>
           </div>
-          <button id="start-submit" type="submit" class="btn primary">Open</button>
-        </form>
-
-        <div id="start-rooms-wrap" hidden>
-          <h2 class="section-title">Resume a session</h2>
-          <ul id="start-rooms" class="rooms-list"></ul>
         </div>
       </div>
     </div>
