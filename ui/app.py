@@ -48,15 +48,10 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-EXIT_COMMANDS = {"exit", "quit", "q"}
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_REPLY_PLACEHOLDERS = ("Your answer…", "y/n")
-
-_CONNECTION_STATES = {
-    "connecting": ("◌ connecting…", "grey62"),
-    "connected": ("● connected", "bold green"),
-    "disconnected": ("✕ disconnected", "bold red"),
-}
+from components import CONNECTION_STATES as _CONNECTION_STATES
+from components import EXIT_COMMANDS
+from components import REPLY_PLACEHOLDERS as _REPLY_PLACEHOLDERS
+from components import SPINNER_FRAMES as _SPINNER_FRAMES
 
 
 def _render_text(props: dict[str, Any]):

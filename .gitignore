@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.log
 frontend
+node_modules/
 
 # tooling
 .ruff_cache/

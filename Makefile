@@ -5,7 +5,7 @@ PIP := .venv/bin/pip
 RUFF := .venv/bin/ruff
 PYTEST := .venv/bin/python -m pytest
 
-.PHONY: help venv install pre-commit lint lint-fix format compile test test-quiet deps-check check server agent cli session clean
+.PHONY: help venv install pre-commit lint lint-fix format compile test test-quiet deps-check check server agent cli session desktop-install desktop clean
 
 help: ## Show this list of commands
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -59,6 +59,12 @@ cli: ## Run via python main.py, loading .env first (pass a path via ARGS, e.g. m
 
 session: ## Run the agent-session CLI (pass args via ARGS, e.g. make session ARGS="create test_session")
 	.venv/bin/agent-session $(ARGS)
+
+desktop-install: ## Install the desktop app's npm dependencies (once)
+	cd desktop && npm install
+
+desktop: ## Run the Electron desktop app (needs `make server` running in another terminal)
+	cd desktop && npm start
 
 clean: ## Remove caches and build artifacts
 	rm -rf __pycache__ .pytest_cache .ruff_cache *.egg-info dist build

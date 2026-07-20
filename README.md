@@ -131,6 +131,11 @@ Type follow-up questions into the input at the bottom. `exit`, `quit`, or `q`
 ends the session. Scroll the transcript with arrow keys, PageUp/PageDown, or
 the mouse wheel — it never scrolls your terminal itself.
 
+Prefer a native window over the terminal? `desktop/` is a cross-platform
+Electron app that connects to the same running `agent-server` and renders
+the identical server-driven UI — same commands, same `/settings` screen,
+every feature the CLI has. See [`desktop/README.md`](desktop/README.md).
+
 ### Settings
 
 Type `/settings` to open an in-TUI screen for everything in the env-var
@@ -189,32 +194,45 @@ implementation of another concern directly, so the dependency graph
 stays a simple tree, not a web:
 
 ```
-core/     shared, dependency-free kernel: path safety, the ask contextvar,
-          the module-lifecycle contract, a generic dir-scan helper
-llm/      the LLM client (get_llm), dispatching to one of llm/providers/
-          (gapgpt, anthropic, ollama) by LLM_PROVIDER, plus a shared
-          raw-IO logging callback
-tool/     every capability the agent has, one file per tool, auto-discovered
-agent/    the reasoning engine: ProjectPipeline, ProjectAnalyst, the
-          Stage/Pipeline system, ContextSynthesizer — framework-free,
-          takes its llm/tools/sink as constructor arguments
-models/   pure data shapes threaded through agent/: ProjectContext, Turn
-wire/     the WebSocket protocol: transport, routes, events, the accept loop
-service/  use-case orchestration: Room, its persistence
-ui/       the TUI: a thin WebSocket client
-hooks/    lets files in extra/ hook into tool/ and agent/ without editing them
-extra/    where you drop your own hook files (see Hooks, below)
+core/       shared, dependency-free kernel: path safety, the ask contextvar,
+            the module-lifecycle contract, a generic dir-scan helper
+llm/        the LLM client (get_llm), dispatching to one of llm/providers/
+            (gapgpt, anthropic, ollama) by LLM_PROVIDER, plus a shared
+            raw-IO logging callback
+tool/       every capability the agent has, one file per tool, auto-discovered
+agent/      the reasoning engine: ProjectPipeline, ProjectAnalyst, the
+            Stage/Pipeline system, ContextSynthesizer — framework-free,
+            takes its llm/tools/sink as constructor arguments
+models/     pure data shapes threaded through agent/: ProjectContext, Turn
+wire/       the WebSocket protocol: transport, routes, events, the accept loop
+service/    use-case orchestration: Room, its persistence
+ui/         the TUI: a thin WebSocket client
+desktop/    the Electron app: a second thin WebSocket client, same protocol
+components/ the UI vocabulary ui/, service/, and desktop/ all share — one
+            spec.json, a Python exporter and a JS exporter (see below)
+hooks/      lets files in extra/ hook into tool/ and agent/ without editing them
+extra/      where you drop your own hook files (see Hooks, below)
 ```
 
 ```
-┌──────────────┐  ws://127.0.0.1:8765  ┌───────────────────────────┐
-│ ui/           │ ────────────────────► │ wire/ (standalone          │
-│ (TUI, thin    │ ◄────────────────────  │ `agent-server` process)   │
-│  client)      │   via a Transport      │ → service.Room             │
-└──────────────┘   (wire/transport/)     │ → agent.ProjectPipeline    │
-                                          │ → rooms/{uuid}.json       │
-                                          └───────────────────────────┘
+  ui/       (TUI, thin client)      ─┐
+                                       │   ws://127.0.0.1:8765
+  desktop/  (Electron, thin client) ─┴──►  wire/ (standalone `agent-server`
+                                              process), via a Transport
+                                              (wire/transport/)
+                                            → service.Room
+                                            → agent.ProjectPipeline
+                                            → rooms/{uuid}.json
 ```
+
+Both clients are *generic* renderers of the exact same server-driven
+`Node`/`UIOp` tree (see "CLI (ui)" and "Desktop" below) — neither has
+any built-in knowledge of a screen, so a feature added once
+server-side (`service/ui_builder.py`) shows up in both without either
+client's own code changing. `components/` (below) is what keeps their
+two renderers from drifting apart on the small pieces that *are*
+client-local (style tokens, exit words, the spinner/connection-state
+constants).
 
 Every feature is served through one connection, addressed generically as
 a `Transport` (`wire/transport/base.py`) — WebSocket is the only one
@@ -429,6 +447,46 @@ applied out of order or dropped ahead of the initial tree mounting.
 `tests/test_app.py` and `tests/test_server.py` drive a real server and
 a real client against each other (`tests/stubs.py`'s pipeline never
 touches the network), so the whole suite never spends a real API token.
+
+### Desktop: a second generic renderer
+
+`desktop/` is a cross-platform (macOS/Windows/Linux) Electron app that
+plays the exact same role `ui/app.py` does, just DOM-based instead of
+Textual-based: it's *also* generic (no header layout, no modal shapes,
+no command list baked in), connects to the same `agent-server` over the
+same protocol, mounts the same `tree`, and applies the same `ui.update`
+ops (`desktop/renderer.js`'s `build()`/`replaceNode()`/`appendNode()`/
+`removeNode()` mirror `ui/app.py`'s `_build()`/`_replace()`/`_append()`/
+`_remove()` step for step). No framework, no bundler — plain DOM APIs
+loaded as a classic script, so it stays close to Electron's own startup
+and interaction-latency floor. See [`desktop/README.md`](desktop/README.md)
+for how to run it.
+
+Because both clients are generic renderers of the same server-built
+tree, **a UI feature only needs one server-side change**
+(`service/ui_builder.py`) to reach both — the only place a feature adds
+client-side code in *both* `ui/app.py` and `desktop/renderer.js` is if
+it touches one of the handful of things that are deliberately
+client-local in both (connection status, the spinner glyph's animation,
+command-popup filtering, `exit`/`quit`/`q` interception — see
+docs/PROTOCOL.md's "UI component protocol" section). Add a node type,
+style token, or client-local constant to `components/` (below) once,
+and both pick it up.
+
+### Components: the vocabulary CLI, server, and desktop all share
+
+`components/spec.json` is the one file that defines every piece of the
+UI vocabulary that isn't room state: the semantic style tokens
+`core/style.py` re-exports (`THINK`, `TOOL`, `MESSAGE`, ...), the Rich
+color names a DOM renderer has to translate to CSS (`ui/app.py` gets
+this for free from Rich; `desktop/` doesn't), `exit`/`quit`/`q`, the
+reply placeholders, the spinner frames, and the three connection-state
+labels. `components/__init__.py` is Python's exporter of it (what
+`core/style.py` and, transitively, `ui/app.py` import);
+`components/js/index.js` + `components/js/richStyle.js` are JS's (what
+`desktop/preload.js` exposes to `desktop/renderer.js`). Add a constant
+to `spec.json` once — never hardcode it separately in `ui/app.py` or
+`desktop/renderer.js` again.
 
 ### Hooks
 

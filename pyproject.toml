@@ -43,6 +43,7 @@ include = [
     "hooks*",
     "extra*",
     "workspace*",
+    "components*",
 ]
 
 [tool.ruff]

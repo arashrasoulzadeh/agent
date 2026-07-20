@@ -1,0 +1,50 @@
+{
+  "styleTokens": {
+    "THINK": "grey50",
+    "TOOL": "bright_cyan",
+    "MESSAGE": "bold bright_cyan",
+    "QUESTION": "bold bright_yellow",
+    "ERROR": "bold red",
+    "INFO": "grey62",
+    "BANNER": "bold bright_cyan"
+  },
+  "richColors": {
+    "black": "#000000",
+    "red": "#800000",
+    "green": "#008000",
+    "yellow": "#808000",
+    "blue": "#000080",
+    "magenta": "#800080",
+    "cyan": "#008080",
+    "white": "#c0c0c0",
+    "bright_black": "#808080",
+    "bright_red": "#ff0000",
+    "bright_green": "#00ff00",
+    "bright_yellow": "#ffff00",
+    "bright_blue": "#0000ff",
+    "bright_magenta": "#ff00ff",
+    "bright_cyan": "#00ffff",
+    "bright_white": "#ffffff"
+  },
+  "nodeTypes": ["container", "text", "input", "button", "list"],
+  "reservedIds": [
+    "header",
+    "header-status",
+    "connection-status",
+    "footer",
+    "footer-info",
+    "footer-input",
+    "content",
+    "modal",
+    "modal-options",
+    "command-popup"
+  ],
+  "exitCommands": ["exit", "quit", "q"],
+  "replyPlaceholders": ["Your answer…", "y/n"],
+  "spinnerFrames": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+  "connectionStates": {
+    "connecting": ["◌ connecting…", "grey62"],
+    "connected": ["● connected", "bold green"],
+    "disconnected": ["✕ disconnected", "bold red"]
+  }
+}
