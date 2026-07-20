@@ -9,8 +9,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from core import settings
 import llm.providers_cli as providers_cli
+from core import settings
 
 
 class ProvidersCliTestCase(unittest.TestCase):

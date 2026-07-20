@@ -47,7 +47,9 @@ def run(argv: list[str]) -> int:
             else:
                 print(f"    {key}: {value}")
     if active not in _ENV_VARS:
-        print(f"\nLLM_PROVIDER={active!r} is not a known provider; choose one of "
-              f"{sorted(_ENV_VARS)}")
+        print(
+            f"\nLLM_PROVIDER={active!r} is not a known provider; choose one of "
+            f"{sorted(_ENV_VARS)}"
+        )
         return 1
     return 0

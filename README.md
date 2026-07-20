@@ -123,7 +123,9 @@ already listening on `ws://127.0.0.1:8765` and tells you to start one if
 not — it never spawns the server itself, so the server's lifecycle is
 never tied to any one client. The server keeps running independent of
 any client, so a room stays live and reachable whether or not the CLI
-that created it is still open.
+that created it is still open. Even the `agent` (no path) prompt itself
+is server-supplied (`/session/prompt`, see `docs/PROTOCOL.md`) rather
+than hardcoded in the client — `cli.py` presents it, it doesn't decide it.
 
 Type follow-up questions into the input at the bottom. `exit`, `quit`, or `q`
 ends the session. Scroll the transcript with arrow keys, PageUp/PageDown, or
@@ -134,7 +136,11 @@ the mouse wheel — it never scrolls your terminal itself.
 Type `/settings` to open an in-TUI screen for everything in the env-var
 table above except `AGENT_WS_HOST`/`AGENT_WS_PORT` (those configure the
 connection this screen lives behind, so they aren't editable through it).
-One row per setting, `Enter` saves that row, `Escape` closes the screen:
+One row per setting; `Tab`/`Shift+Tab` or the `Up`/`Down` arrows move
+between fields (the currently focused one is highlighted so it's never
+ambiguous which field a keystroke goes to), `Enter` saves the focused
+row, `Escape` closes the screen. The screen scrolls if it doesn't fit
+your terminal:
 
 ```
 /settings
@@ -506,7 +512,11 @@ and drop `execute` from `AGENT_TOOLS` if that isn't acceptable.
 
 The server logs through the standard `logging` module
 (`wire/app.py` configures it for the whole process) — every
-request, route failure, and raw LLM request/response line. Set
+request, route failure, raw LLM request/response line, and outgoing
+`ui.update` op (`service.rooms ui.update replace header (type=container)`,
+`... append content (type=text)`, etc. — what's actually being
+created/replaced/removed on a client's screen, and when). All of this
+runs unconditionally, independent of `AGENT_VERBOSE`. Set
 `AGENT_VERBOSE=1` to also print the LLM request/response lines rather
 than only logging them. Those `AGENT_VERBOSE` print lines are always
 flushed immediately, so they still show up promptly when stdout isn't a

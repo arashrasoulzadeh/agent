@@ -18,6 +18,7 @@ the rendered content/footer text.
 
 import asyncio
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -28,6 +29,7 @@ from rich.console import Console
 from textual.widgets import Button, Input, OptionList, Static
 
 from core import settings
+from service import rooms
 from service.ui_builder import COMMANDS
 from tests.stubs import (
     AskToolPipeline,
@@ -190,8 +192,10 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
                 await pilot.press(*"Widget")
                 await pilot.press("enter")
                 await wait_until(
-                    lambda: footer_placeholder(app) != "Your answer…"
-                    and "header-status" not in app._widgets
+                    lambda: (
+                        footer_placeholder(app) != "Your answer…"
+                        and "header-status" not in app._widgets
+                    )
                 )
                 self.assertIn("got: Widget", log_text(app))
 
@@ -213,8 +217,9 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.click("#opt-1")  # "b"
                 await wait_until(
-                    lambda: not modal_visible(app)
-                    and "header-status" not in app._widgets
+                    lambda: (
+                        not modal_visible(app) and "header-status" not in app._widgets
+                    )
                 )
                 self.assertIn("got: b", log_text(app))
 
@@ -239,8 +244,10 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
                 await pilot.press(*"c")
                 await pilot.press("enter")
                 await wait_until(
-                    lambda: footer_placeholder(app) != "Your answer…"
-                    and "header-status" not in app._widgets
+                    lambda: (
+                        footer_placeholder(app) != "Your answer…"
+                        and "header-status" not in app._widgets
+                    )
                 )
                 self.assertIn("got: c", log_text(app))
 
@@ -706,8 +713,10 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 await pilot.press(*"done")
                 await pilot.press("enter")
                 await wait_until(
-                    lambda: footer_placeholder(app) != "Your answer…"
-                    and "header-status" not in app._widgets
+                    lambda: (
+                        footer_placeholder(app) != "Your answer…"
+                        and "header-status" not in app._widgets
+                    )
                 )
 
     async def test_unmatched_slash_text_still_falls_through_to_a_prompt(self):
@@ -731,22 +740,64 @@ class TestConnectionStatus(unittest.IsolatedAsyncioTestCase):
     client (a disconnected client can't be told anything) — rendered
     entirely client-side into the reserved #connection-status node."""
 
+    def setUp(self):
+        # A small throwaway project, not this repo's own checkout — a
+        # real bootstrap still walks whatever path it's given
+        # (StubPipeline only stubs the LLM call, not ContextCollector),
+        # and this repo is large enough that "." made these tests
+        # genuinely slow/flaky under load, not actually broken.
+        self.project_dir = Path(tempfile.mkdtemp())
+        (self.project_dir / "main.py").write_text("x = 1\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+
     async def test_shows_connected_once_the_session_is_up(self):
         async with running_server(StubPipeline) as uri:
-            app = AgentApp(uri, ".")
+            app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)):
                 await wait_idle(app)
                 self.assertIn("connected", connection_status_text(app))
 
     async def test_shows_disconnected_when_the_connection_drops(self):
         async with running_server(StubPipeline) as uri:
-            app = AgentApp(uri, ".")
+            app = AgentApp(uri, str(self.project_dir))
             async with app.run_test(size=(100, 40)):
                 await wait_idle(app)
                 await app.ws.close()
-                await wait_until(
-                    lambda: "disconnected" in connection_status_text(app)
-                )
+                await wait_until(lambda: "disconnected" in connection_status_text(app))
+
+
+class TestResumeScrollsToEnd(unittest.IsolatedAsyncioTestCase):
+    """A resumed session's tree arrives with its whole transcript already
+    replayed as #content's children (service/rooms.py's ui_tree()) —
+    unlike a fresh session's near-empty one, it must open scrolled to the
+    latest entry, not the oldest."""
+
+    async def test_resumed_session_opens_scrolled_to_the_latest_entry(self):
+        async with running_server(StubPipeline) as uri:
+            room_id = "scroll-test-room"
+            payload = {
+                "id": room_id,
+                "path": ".",
+                "projects": {},
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "updated_at": "2024-01-01T00:00:00+00:00",
+                "tokens": {},
+                "messages": [],
+                "transcript": [
+                    {"type": "message", "text": f"line {i}"} for i in range(40)
+                ],
+            }
+            rooms.ROOMS_DIR.mkdir(parents=True, exist_ok=True)
+            (rooms.ROOMS_DIR / f"{room_id}.json").write_text(json.dumps(payload))
+
+            app = AgentApp(uri, ".", room=room_id)
+            async with app.run_test(size=(80, 15)):
+                await wait_for_tree(app)
+                await asyncio.sleep(0.2)
+                content = app._widgets["content"]
+                self.assertTrue(content.is_vertical_scroll_end)
 
 
 if __name__ == "__main__":

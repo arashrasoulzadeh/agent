@@ -28,14 +28,26 @@ from workspace.synthesis_repository import SynthesisRepository
 
 
 async def recv_until(ws, predicate, timeout=5):
-    """Read messages until one matches, discarding the rest. Callers must
-    know the emission order well enough that what they skip past is
-    never something they'll need to check later."""
+    """Read messages until one matches `predicate`. A non-matching
+    message is buffered on `ws` itself, not discarded — some routes
+    broadcast a ui.update *before* their RPC ack, so a later, different
+    predicate can still need a message an earlier recv_until call
+    already read past (see tests/test_ui_events.py's identical helper
+    for the concrete case this fixes)."""
+    buffer = getattr(ws, "_pending", None)
+    if buffer is None:
+        buffer = []
+        ws._pending = buffer
+    for i, msg in enumerate(buffer):
+        if predicate(msg):
+            del buffer[i]
+            return msg
     async with asyncio.timeout(timeout):
         while True:
             msg = json.loads(await ws.recv())
             if predicate(msg):
                 return msg
+            buffer.append(msg)
 
 
 async def wait_until(predicate, timeout=2.0, interval=0.02):
@@ -60,6 +72,13 @@ async def send_request(ws, route, data=None, room=None):
     if not resp["ok"]:
         raise AssertionError(resp["error"])
     return resp["data"]
+
+
+class TestSessionPrompt(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_text_and_default_with_no_room(self):
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            data = await send_request(ws, "/session/prompt")
+            self.assertEqual(data, {"text": "Project path", "default": "."})
 
 
 class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):

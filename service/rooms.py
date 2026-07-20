@@ -38,7 +38,6 @@ a different project, potentially — stay isolated from one another.
 import asyncio
 import hashlib
 import logging
-import os
 import queue
 import uuid
 from dataclasses import asdict
@@ -566,7 +565,8 @@ class Room:
     def _content_node(self, kind: str, **fields: Any) -> Node:
         # "content-" prefix: Textual widget ids must not start with a
         # digit, and a raw uuid4().hex does about 62% of the time.
-        return ui_builder.content_entry_node(kind, f"content-{uuid.uuid4().hex}", **fields)
+        node_id = f"content-{uuid.uuid4().hex}"
+        return ui_builder.content_entry_node(kind, node_id, **fields)
 
     def _content_ops(self, kind: str, **fields: Any) -> list[UIOp]:
         """One append op for a new content entry, plus the same

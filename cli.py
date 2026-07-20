@@ -9,6 +9,11 @@ any client.
 Once connected, it hands off to the full-screen TUI (ui/app.py), which
 creates or resumes a room and renders whatever the server reports.
 
+Even the pre-connection "what project?" prompt (when no `path`/`--room`
+was given) isn't hardcoded here — its text and default come from the
+server (`/session/prompt`, `wire/discovery.py`'s `fetch_session_prompt`),
+this file only presents it and reads the answer.
+
 `agent update` / `agent uninstall` / `agent providers` are a different
 mode entirely — self-management or provider inspection, not a project
 session — dispatched to self_update.py / llm/providers_cli.py before
@@ -71,8 +76,15 @@ def main(argv: list[str] | None = None) -> None:
     path = args.path
     if not args.room and not path:
         # This happens before the TUI takes the screen, so a plain
-        # blocking prompt is fine here.
-        path = input("Project path [.]: ").strip() or "."
+        # blocking prompt is fine here — but the prompt's own text and
+        # default come from the server (wire/routes.py's
+        # session_prompt), not hardcoded here; the CLI just presents it.
+        try:
+            prompt = asyncio.run(discovery.fetch_session_prompt(args.host, args.port))
+        except discovery.ServerNotRunning as exc:
+            sys.exit(str(exc))
+        default = prompt["default"]
+        path = input(f"{prompt['text']} [{default}]: ").strip() or default
 
     try:
         asyncio.run(discovery.require_running(args.host, args.port))

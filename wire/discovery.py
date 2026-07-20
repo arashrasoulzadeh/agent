@@ -5,6 +5,9 @@ they never start it, so the server's lifecycle is never tied to any one
 client.
 """
 
+import json
+import uuid
+
 import websockets
 
 from wire.config import HOST, PORT
@@ -35,3 +38,25 @@ async def require_running(host: str = HOST, port: int = PORT) -> None:
     """Raise ServerNotRunning unless a server is already up. Never spawns."""
     if not await is_running(host, port):
         raise ServerNotRunning(host, port)
+
+
+async def fetch_session_prompt(host: str = HOST, port: int = PORT) -> dict:
+    """The {"text", "default"} for cli.py's startup path prompt —
+    server-owned copy (wire/routes.py's session_prompt), not hardcoded
+    client-side. Raises ServerNotRunning on the same connection failure
+    require_running() checks for.
+    """
+    try:
+        async with websockets.connect(f"ws://{host}:{port}", open_timeout=1) as ws:
+            request_id = str(uuid.uuid4())
+            await ws.send(
+                json.dumps({"id": request_id, "route": "/session/prompt", "data": {}})
+            )
+            while True:
+                msg = json.loads(await ws.recv())
+                if msg.get("id") == request_id:
+                    if not msg["ok"]:
+                        raise RuntimeError(msg["error"])
+                    return msg["data"]
+    except OSError:
+        raise ServerNotRunning(host, port) from None

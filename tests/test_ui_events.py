@@ -22,11 +22,26 @@ from tests.stubs import AskToolPipeline, SlowPipeline, StubPipeline, running_ser
 
 
 async def recv_until(ws, predicate, timeout=5):
+    """Read messages until one matches `predicate`. A non-matching
+    message is buffered on `ws` itself, not discarded — some routes
+    (settings/add/projects submit, via /ui/event) broadcast their
+    ui.update *before* the RPC ack, so send_request's id-match would
+    otherwise silently read past the exact ui.update a later
+    _wait_for_op call is waiting for, hanging until timeout."""
+    buffer = getattr(ws, "_pending", None)
+    if buffer is None:
+        buffer = []
+        ws._pending = buffer
+    for i, msg in enumerate(buffer):
+        if predicate(msg):
+            del buffer[i]
+            return msg
     async with asyncio.timeout(timeout):
         while True:
             msg = json.loads(await ws.recv())
             if predicate(msg):
                 return msg
+            buffer.append(msg)
 
 
 async def send_request(ws, route, data=None, room=None):
@@ -178,6 +193,10 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
             self.assertFalse(final["data"]["turn_active"])
 
     async def test_projects_command_appends_info_without_a_turn(self):
+        # A room always has its own primary project in project_list() —
+        # wire/routes.py's _projects_info_text's "No projects attached"
+        # branch is unreachable for a real room; a fresh room's /projects
+        # always lists at least that primary project.
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
             data = await send_request(ws, "/session/create", {"path": "."})
             room_id = data["room"]
@@ -197,9 +216,9 @@ class TestFooterSubmitDispatch(SettingsIsolatedTestCase):
                 ws,
                 "append",
                 "content",
-                lambda node: "No projects attached" in node["props"].get("text", ""),
+                lambda node: "Attached projects" in node["props"].get("text", ""),
             )
-            self.assertIn("No projects attached", append["node"]["props"]["text"])
+            self.assertIn("Attached projects", append["node"]["props"]["text"])
 
     async def test_add_without_args_shows_usage_locally(self):
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:

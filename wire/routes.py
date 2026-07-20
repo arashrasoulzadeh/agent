@@ -40,6 +40,15 @@ def _fire(coro) -> None:
     task.add_done_callback(_report)
 
 
+async def session_prompt(transport: Transport, data: dict) -> dict:
+    """What cli.py should ask for before it has a path to call
+    /session/create with — server-owned copy, not hardcoded client-side
+    (see ui/app.py's own "generic server-driven UI renderer" framing).
+    No room needed, same precedent as /session/create's own no-room
+    request."""
+    return {"text": "Project path", "default": "."}
+
+
 async def session_create(transport: Transport, data: dict) -> dict:
     path = data.get("path")
     if not path:
@@ -340,6 +349,7 @@ def _require_room(data: dict) -> "rooms.Room":
 
 
 ROUTES: dict[str, Any] = {
+    "/session/prompt": session_prompt,
     "/session/create": session_create,
     "/session/resume": session_resume,
     "/prompt": prompt,

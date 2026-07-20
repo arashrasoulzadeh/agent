@@ -275,6 +275,15 @@ class AgentApp(App):
                         "failed to handle an incoming message"
                     )
         except websockets.ConnectionClosed:
+            pass
+        # `async for` above also ends silently, with no exception, on a
+        # *clean* close (websockets' own __aiter__ swallows
+        # ConnectionClosedOK internally) — a graceful server shutdown
+        # looks exactly like this, not like the abnormal-close case the
+        # `except` above alone would catch. Either way the loop ending
+        # means the connection is gone, unless it's this app's own
+        # on_unmount closing self.ws as part of a normal exit.
+        if self.is_running:
             await self._fatal("Lost connection to the agent server.")
 
     def _handle(self, msg: dict[str, Any]) -> None:
@@ -354,11 +363,20 @@ class AgentApp(App):
         # preserved by index, captured before removal shifts it.
         parent = existing.parent if existing is not None else None
         index = parent.children.index(existing) if parent is not None else None
+
+        # _forget_children then _build, with no `await` between them, so
+        # self._widgets goes straight from the old subtree's ids to the
+        # new one's — never a state where a child both sides share (e.g.
+        # "connection-status", present in every header rebuild) is
+        # observably missing. That gap is real: `await existing.remove()`
+        # is a genuine yield point, and anything polling self._widgets
+        # (a #header-status check, _tick's spinner, another client
+        # request) can run during it.
         if existing is not None:
             self._forget_children(existing)
-            await existing.remove()
-
         new_widget = self._build(node)
+        if existing is not None:
+            await existing.remove()
 
         if target == "modal":
             await self._modal_slot.mount(new_widget)
@@ -412,6 +430,20 @@ class AgentApp(App):
         self._modal_slot.display = False
         self._set_connection_status("connected")
         self._root_mounted.set()
+        # A resumed session's tree arrives with its whole transcript
+        # already replayed as "content"'s children (unlike a fresh
+        # session's near-empty one) — without this it opens scrolled to
+        # the top, showing the oldest turn instead of the most recent one.
+        # Called twice: scroll_end's own post-refresh deferral accounts
+        # for most of the transcript's layout, but a tall/rich reply
+        # (markdown, a panel) can still shift height afterward — e.g. a
+        # vertical scrollbar appearing narrows the content width, which
+        # rewraps text taller — so a second pass shortly after catches
+        # any such late reflow the first one landed just before.
+        content = self._widgets.get("content")
+        if content is not None:
+            content.scroll_end(animate=False)
+            self.set_timer(0.2, lambda: content.scroll_end(animate=False))
         footer_input = self._widgets.get("footer-input")
         if footer_input is not None:
             footer_input.focus()
