@@ -144,6 +144,18 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _log_ui_ops(ops: list[UIOp]) -> None:
+    """One INFO line per outgoing ui.update op — what's actually being
+    created/replaced/removed on a client's screen, not just that a
+    request/response happened. Runs unconditionally (like every other
+    logger.info in this module), independent of AGENT_VERBOSE — that
+    flag only gates llm/callbacks.py's extra raw-I/O print."""
+    for op in ops:
+        node = op.node
+        detail = f"type={node.type}" if node is not None else "no node"
+        logger.info("ui.update %s %s (%s)", op.op, op.target, detail)
+
+
 def room_id_for_path(path: str) -> str:
     """A stable room id derived from a project path, not a random one.
 
@@ -541,12 +553,14 @@ class Room:
         )
 
     async def _emit_ui(self, ops: list[UIOp]) -> None:
+        _log_ui_ops(ops)
         await self._emit(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})
 
     def broadcast_ui_now(self, ops: list[UIOp]) -> None:
         """broadcast_now()'s counterpart for UI ops — called from the
         worker thread (RoomSink's tool_call/tool_result/tokens, and
         _ask_and_wait, all run there)."""
+        _log_ui_ops(ops)
         self.broadcast_now(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})
 
     def _content_node(self, kind: str, **fields: Any) -> Node:

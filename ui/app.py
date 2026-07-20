@@ -154,9 +154,41 @@ class AgentApp(App):
     #modal {
         width: auto;
         max-width: 90%;
+        max-height: 90%;
+        overflow-y: auto;
         border: heavy $primary;
         padding: 1 2;
         background: $surface;
+    }
+
+    /* Settings rows only ("#modal-options" — the question modal's button
+    row — is also a Horizontal, but has no Static/Input children, so it's
+    untouched). Without an explicit width, the label Static defaults to
+    filling the whole row, pushing Input entirely outside it (and
+    Input's default 3-row border was being clipped to the row's 1-row
+    height) — invisible fields, not just a layout quirk. */
+    #modal Horizontal {
+        height: auto;
+    }
+
+    #modal Horizontal > Static {
+        width: auto;
+        padding: 0 2 0 0;
+    }
+
+    #modal Horizontal > Input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        background: $boost;
+    }
+
+    /* select_on_focus (Textual's Input default) only highlights existing
+    text — an empty field (e.g. Ollama model with nothing typed yet)
+    shows no visual difference at all when focused. This makes the
+    active row obvious regardless of content. */
+    #modal Horizontal > Input:focus {
+        background: $accent 40%;
     }
     """
 
@@ -536,23 +568,23 @@ class AgentApp(App):
 
     def action_popup_prev(self) -> None:
         popup = self._widgets.get("command-popup")
-        if (
-            not isinstance(popup, OptionList)
-            or not popup.display
-            or not popup.option_count
-        ):
+        if isinstance(popup, OptionList) and popup.display and popup.option_count:
+            popup.highlighted = ((popup.highlighted or 0) - 1) % popup.option_count
             return
-        popup.highlighted = ((popup.highlighted or 0) - 1) % popup.option_count
+        # Not the footer's command popup — up/down inside an open modal
+        # (settings, a question with options) moves focus between its
+        # fields instead, the same as Tab/Shift-Tab, since a modal's
+        # Input doesn't otherwise do anything with up/down itself.
+        if self._modal_slot is not None and self._modal_slot.display:
+            self.action_focus_previous()
 
     def action_popup_next(self) -> None:
         popup = self._widgets.get("command-popup")
-        if (
-            not isinstance(popup, OptionList)
-            or not popup.display
-            or not popup.option_count
-        ):
+        if isinstance(popup, OptionList) and popup.display and popup.option_count:
+            popup.highlighted = ((popup.highlighted or 0) + 1) % popup.option_count
             return
-        popup.highlighted = ((popup.highlighted or 0) + 1) % popup.option_count
+        if self._modal_slot is not None and self._modal_slot.display:
+            self.action_focus_next()
 
     def action_dismiss_overlay(self) -> None:
         """Escape: hides the command popup if it's showing; otherwise
