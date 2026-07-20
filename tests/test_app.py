@@ -835,7 +835,10 @@ class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: agent_ui_panel(app) is not None)
 
                 panel = agent_ui_panel(app)
-                self.assertEqual(panel.border_title, "Comparison")
+                # "✦ " marks an agent-built panel at a glance, distinct
+                # from a plain answer/error panel — see
+                # agent_ui_node()'s own comment.
+                self.assertEqual(panel.border_title, "✦ Comparison")
                 # The panel's own blocks are Static widgets *nested inside*
                 # this container, not direct #content children — log_text()
                 # only walks direct children (right for every other content
@@ -870,12 +873,18 @@ class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
 
                 await wait_until(lambda: "header-status" not in app._widgets)
                 await pilot.click(f"#{buttons[0].id}")
-                await wait_until(lambda: "stub answer to: Option A" in log_text(app))
-                # The clicked button's own label round-tripped as an
-                # ordinary user message too — clicking a quick reply is
-                # meant to be indistinguishable from typing and sending
-                # that same text.
-                self.assertIn("> Option A", log_text(app))
+                # The chat bubble stays exactly the button's own label —
+                # indistinguishable from having typed and sent that same
+                # text — while the agent's next turn (echoed back by
+                # StubPipeline, which parrots whatever it was asked)
+                # actually received the panel's title and summary folded
+                # in as context (Room.run_prompt()'s `llm_text` split).
+                await wait_until(
+                    lambda: 'the user chose: "Option A"' in log_text(app)
+                )
+                text = log_text(app)
+                self.assertIn("> Option A", text)
+                self.assertIn('Regarding the panel titled "Comparison"', text)
 
 
 if __name__ == "__main__":

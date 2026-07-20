@@ -32,6 +32,12 @@
  */
 
 const { parseRichStyle, setRichColors } = window.agentComponents;
+// The markdown renderer (desktop/markdown.js, which also holds the
+// syntax highlighter renderMarkdown calls internally) — pure
+// string-in/string-out logic with no DOM dependency, split out so it's
+// independently unit tested (desktop/markdown.test.js) rather than
+// living inline here untested.
+const { renderMarkdown } = window.agentMarkdown;
 
 let STYLE_TOKENS = {};
 let EXIT_COMMANDS = [];
@@ -71,199 +77,6 @@ function makeId() {
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
-}
-
-// ---- a compact, escape-first markdown renderer ------------------------
-// Answers are LLM output rendered as markdown (props.format === "markdown").
-// Escapes everything first, then only ever re-introduces a small, fixed
-// set of closed HTML tags — never raw user/model text as markup — so an
-// answer can't inject arbitrary HTML. Covers what LLM answers actually
-// use: paragraphs, headings, code (fenced + inline), bold/italic, links
-// (http(s) only), lists, and blockquotes. Not a full CommonMark parser.
-// A fenced code block additionally gets a language label + one-click
-// copy (handleDelegatedClick, below) and best-effort syntax
-// highlighting (highlightCode, below) — see that function's own
-// docstring for what it is and isn't.
-
-function escapeHtml(text) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ---- a small, honest syntax highlighter --------------------------------
-// Not a real tokenizer/parser (no per-language grammar, no nesting rules)
-// — one shared regex per language classifying comments/strings/numbers/
-// identifiers by pattern alone. Good enough to make a code block
-// scannable; wrong on edge cases a real lexer wouldn't be (e.g. a `#`
-// inside a JS regex literal). ui/app.py gets real Pygments highlighting
-// for free from Rich; this is what closes that gap for desktop without
-// pulling in a highlighting library and its grammar files.
-
-const LANG_ALIASES = {
-  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-  ts: 'typescript', tsx: 'typescript',
-  py: 'python', py3: 'python',
-  sh: 'bash', shell: 'bash', zsh: 'bash', bash: 'bash', console: 'bash',
-  rb: 'ruby',
-  golang: 'go',
-  rs: 'rust',
-  yml: 'yaml',
-  c: 'c', h: 'c', cpp: 'c', 'c++': 'c', cc: 'c',
-};
-
-const LANG_KEYWORDS = {
-  python: ['def', 'return', 'if', 'elif', 'else', 'for', 'while', 'in', 'not', 'and', 'or', 'import', 'from', 'as', 'class', 'try', 'except', 'finally', 'with', 'lambda', 'yield', 'pass', 'break', 'continue', 'None', 'True', 'False', 'self', 'raise', 'async', 'await', 'global', 'nonlocal', 'is', 'del'],
-  javascript: ['function', 'return', 'if', 'else', 'for', 'while', 'in', 'of', 'const', 'let', 'var', 'class', 'try', 'catch', 'finally', 'import', 'export', 'from', 'as', 'new', 'this', 'typeof', 'instanceof', 'null', 'undefined', 'true', 'false', 'async', 'await', 'yield', 'switch', 'case', 'break', 'continue', 'default', 'extends', 'super', 'static', 'throw', 'delete', 'void'],
-  bash: ['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'do', 'done', 'case', 'esac', 'function', 'return', 'local', 'export', 'in', 'echo', 'exit', 'set'],
-  json: ['true', 'false', 'null'],
-  go: ['func', 'return', 'if', 'else', 'for', 'range', 'package', 'import', 'var', 'const', 'type', 'struct', 'interface', 'map', 'chan', 'go', 'defer', 'select', 'switch', 'case', 'default', 'break', 'continue', 'nil', 'true', 'false'],
-  rust: ['fn', 'return', 'if', 'else', 'for', 'while', 'loop', 'match', 'let', 'mut', 'const', 'struct', 'enum', 'impl', 'trait', 'pub', 'use', 'mod', 'self', 'Self', 'true', 'false', 'None', 'Some', 'Ok', 'Err', 'async', 'await'],
-  sql: ['select', 'from', 'where', 'insert', 'into', 'values', 'update', 'set', 'delete', 'create', 'table', 'drop', 'alter', 'join', 'left', 'right', 'inner', 'outer', 'on', 'group', 'by', 'order', 'having', 'limit', 'and', 'or', 'not', 'null', 'as', 'distinct'],
-  ruby: ['def', 'end', 'return', 'if', 'elsif', 'else', 'unless', 'for', 'while', 'in', 'do', 'class', 'module', 'require', 'nil', 'true', 'false', 'self', 'yield', 'begin', 'rescue', 'ensure', 'raise'],
-  c: ['int', 'char', 'float', 'double', 'void', 'struct', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue', 'static', 'const', 'sizeof', 'typedef', 'enum', 'union', 'unsigned', 'signed', 'null', 'NULL'],
-};
-LANG_KEYWORDS.typescript = [...LANG_KEYWORDS.javascript, 'interface', 'type', 'implements', 'enum', 'namespace', 'public', 'private', 'protected', 'readonly', 'is', 'declare'];
-
-const LANG_COMMENTS = {
-  python: '#.*', bash: '#.*', ruby: '#.*', yaml: '#.*',
-  javascript: '//.*|/\\*[\\s\\S]*?\\*/',
-  typescript: '//.*|/\\*[\\s\\S]*?\\*/',
-  go: '//.*|/\\*[\\s\\S]*?\\*/',
-  rust: '//.*|/\\*[\\s\\S]*?\\*/',
-  c: '//.*|/\\*[\\s\\S]*?\\*/',
-  css: '/\\*[\\s\\S]*?\\*/',
-  sql: '--.*',
-  html: '<!--[\\s\\S]*?-->',
-  xml: '<!--[\\s\\S]*?-->',
-};
-
-function highlightCode(code, langTag) {
-  const language = LANG_ALIASES[langTag] || langTag;
-  const keywords = new Set(LANG_KEYWORDS[language] || []);
-  const commentSource = LANG_COMMENTS[language];
-  if (!keywords.size && !commentSource) return escapeHtml(code); // unrecognized language: still safe, just plain
-
-  const combined = new RegExp(
-    `(?<comment>${commentSource || '(?!)'})` +
-      `|(?<string>"(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|\`(?:[^\`\\\\]|\\\\.)*\`)` +
-      `|(?<number>\\b\\d+(?:\\.\\d+)?\\b)` +
-      `|(?<word>[A-Za-z_$][A-Za-z0-9_$]*)`,
-    'g'
-  );
-
-  const out = [];
-  let lastIndex = 0;
-  let match;
-  while ((match = combined.exec(code)) !== null) {
-    if (match.index > lastIndex) out.push(escapeHtml(code.slice(lastIndex, match.index)));
-    const { comment, string, number, word } = match.groups;
-    const token = match[0];
-    if (comment !== undefined) out.push(`<span class="tok-comment">${escapeHtml(token)}</span>`);
-    else if (string !== undefined) out.push(`<span class="tok-string">${escapeHtml(token)}</span>`);
-    else if (number !== undefined) out.push(`<span class="tok-number">${escapeHtml(token)}</span>`);
-    else if (word !== undefined && keywords.has(word)) out.push(`<span class="tok-keyword">${escapeHtml(token)}</span>`);
-    else if (word !== undefined && code[combined.lastIndex] === '(') out.push(`<span class="tok-function">${escapeHtml(token)}</span>`);
-    else out.push(escapeHtml(token));
-    lastIndex = combined.lastIndex;
-  }
-  out.push(escapeHtml(code.slice(lastIndex)));
-  return out.join('');
-}
-
-function renderInlineMarkdown(text) {
-  let out = escapeHtml(text);
-  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  out = out.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, href) => {
-    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  });
-  return out;
-}
-
-function renderMarkdown(text) {
-  const lines = (text || '').replace(/\r\n/g, '\n').split('\n');
-  const html = [];
-  let i = 0;
-  let listTag = null;
-
-  const closeList = () => {
-    if (listTag) {
-      html.push(`</${listTag}>`);
-      listTag = null;
-    }
-  };
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    if (line.trim().startsWith('```')) {
-      closeList();
-      const langTag = line.trim().slice(3).trim().toLowerCase();
-      const codeLines = [];
-      i += 1;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) {
-        codeLines.push(lines[i]);
-        i += 1;
-      }
-      const code = codeLines.join('\n');
-      html.push(
-        '<div class="code-block-wrap">' +
-          '<div class="code-block-bar">' +
-          `<span class="code-lang">${escapeHtml(langTag || 'text')}</span>` +
-          '<button type="button" class="code-copy-btn">Copy</button>' +
-          '</div>' +
-          `<pre><code>${highlightCode(code, langTag)}</code></pre>` +
-          '</div>'
-      );
-      i += 1;
-      continue;
-    }
-
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
-    if (heading) {
-      closeList();
-      const level = heading[1].length;
-      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      i += 1;
-      continue;
-    }
-
-    const quote = /^>\s?(.*)$/.exec(line);
-    if (quote) {
-      closeList();
-      html.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
-      i += 1;
-      continue;
-    }
-
-    const unordered = /^[-*]\s+(.*)$/.exec(line);
-    const ordered = /^\d+\.\s+(.*)$/.exec(line);
-    if (unordered || ordered) {
-      const tag = unordered ? 'ul' : 'ol';
-      if (listTag !== tag) {
-        closeList();
-        html.push(`<${tag}>`);
-        listTag = tag;
-      }
-      html.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
-      i += 1;
-      continue;
-    }
-
-    closeList();
-    if (line.trim() === '') {
-      i += 1;
-      continue;
-    }
-    html.push(`<p>${renderInlineMarkdown(line)}</p>`);
-    i += 1;
-  }
-  closeList();
-  return html.join('\n');
 }
 
 // ---- generic renderer state --------------------------------------------
@@ -332,6 +145,8 @@ function build(node) {
     // kind === "log" — the content transcript.
     node_el = el('div', 'node-list-log');
     for (const child of children) node_el.appendChild(build(child));
+  } else if (type === 'table') {
+    node_el = buildTable(props);
   } else {
     throw new Error(`unknown node: ${JSON.stringify(node)}`);
   }
@@ -396,6 +211,41 @@ function buildText(props) {
 
   inner.classList.add('node-text');
   return inner;
+}
+
+// A show_ui table block (service/ui_builder.py's _table_node()) — a
+// real HTML <table>, not formatted text; the CLI equivalent is a real
+// rich.table.Table (ui/app.py's _build()). Text content only (no
+// markdown, no spans) — a table cell is exactly one string, matching
+// what content_entry_node's other block kinds already assume.
+function buildTable(props) {
+  const wrap = el('div', 'node-table-wrap');
+  const table = el('table', 'node-table');
+  const headers = props.headers || [];
+  if (headers.length) {
+    const thead = el('thead');
+    const row = el('tr');
+    for (const header of headers) {
+      const th = el('th');
+      th.textContent = header;
+      row.appendChild(th);
+    }
+    thead.appendChild(row);
+    table.appendChild(thead);
+  }
+  const tbody = el('tbody');
+  for (const row of props.rows || []) {
+    const tr = el('tr');
+    for (const cell of row) {
+      const td = el('td');
+      td.textContent = cell;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
 }
 
 function buildOptionsList(node) {
@@ -598,6 +448,20 @@ function mountRoot(tree) {
   appScreen.appendChild(root);
   document.getElementById('start-screen').hidden = true;
   appScreen.hidden = false;
+  // A client-owned status line, mounted once as an extra sibling inside
+  // the server's own "footer" container — safe because nothing in the
+  // protocol ever replaces "footer" itself, only "footer-info"/
+  // "footer-input" individually by their own id (service/rooms.py's
+  // _state_ops()), so this element is never touched by an incoming
+  // ui.update op. Same trick as #modal-slot: client-local cosmetics
+  // live outside the tree the server actually rebuilds.
+  const footer = widgets.get('footer');
+  if (footer) {
+    const hint = el('div', 'token-hint');
+    hint.id = 'token-hint';
+    footer.appendChild(hint);
+    widgets.set('token-hint', hint);
+  }
   setConnectionStatus('connected');
   rootMounted = true;
   drainQueue();
@@ -727,8 +591,29 @@ appScreen.addEventListener('input', (e) => {
   const target = e.target;
   if (target instanceof HTMLInputElement && target.id === 'footer-input') {
     updateCommandPopup(target.value);
+    updateTokenHint(target.value);
   }
 });
+
+// ---- token estimate (client-local cosmetic, like the spinner) ---------
+
+// A fast, dependency-free approximation shown before sending — not a
+// real tokenizer, ~4 characters per token (the commonly-cited rule of
+// thumb for English text), rounded up. ui/app.py's _estimate_tokens()
+// uses the identical formula so the number reads the same on both
+// clients; duplicated rather than shared via components/ since it's a
+// trivial, stateless algorithm, not server-owned UI data.
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function updateTokenHint(value) {
+  const hint = widgets.get('token-hint');
+  if (!hint) return;
+  const count = estimateTokens(value);
+  hint.textContent = count ? `~${count} token${count === 1 ? '' : 's'}` : '';
+}
 
 function handleDelegatedClick(e) {
   const copyBtn = e.target.closest('.code-copy-btn');

@@ -19,6 +19,7 @@ from service import rooms
 from tests.stubs import (
     AskToolPipeline,
     FailingPipeline,
+    ShowUiPipeline,
     StubPipeline,
     ToolCallingPipeline,
     running_server,
@@ -79,6 +80,20 @@ class TestSessionPrompt(unittest.IsolatedAsyncioTestCase):
         async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
             data = await send_request(ws, "/session/prompt")
             self.assertEqual(data, {"text": "Project path", "default": "."})
+
+
+class TestUiSpecRoute(unittest.IsolatedAsyncioTestCase):
+    """/ui/spec — the client-local UI vocabulary every generic renderer
+    fetches before anything else (see docs/PROTOCOL.md). No room needed,
+    same no-room precedent /session/prompt above tests."""
+
+    async def test_returns_the_real_spec_contents_with_no_room(self):
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            data = await send_request(ws, "/ui/spec")
+            self.assertEqual(data["exitCommands"], ["exit", "quit", "q"])
+            self.assertIn("connecting", data["connectionStates"])
+            self.assertEqual(data["styleTokens"]["THINK"], "grey50")
+            self.assertIn("bright_cyan", data["richColors"])
 
 
 class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
@@ -231,6 +246,98 @@ class TestSessionLifecycle(unittest.IsolatedAsyncioTestCase):
             await send_request(ws, "/session/create", {"path": "/nonexistent"})
             error = await recv_until(ws, lambda m: m.get("event") == "error")
             self.assertIn("bad project path", error["data"]["message"])
+
+
+class TestQuickReplyDispatch(unittest.IsolatedAsyncioTestCase):
+    """The show_ui tool's quick-reply buttons, at the wire-protocol
+    level — complements (doesn't duplicate) tests/test_app.py's
+    TestShowUiTool, which asserts on rendered widget state instead of
+    raw route responses/events."""
+
+    async def _create_panel_with_replies(self, ws):
+        data = await send_request(ws, "/session/create", {"path": "."})
+        room_id = data["room"]
+        await recv_until(ws, lambda m: m.get("event") == "answer")  # bootstrap
+
+        await send_request(ws, "/prompt", {"text": "show-me-with-replies"}, room=room_id)
+        await recv_until(
+            ws, lambda m: m.get("event") == "answer" and "shown:" in m["data"]["text"]
+        )
+        live_room = rooms.ROOMS[room_id]
+        button_id = next(iter(live_room.quick_reply_context))
+        return room_id, live_room, button_id
+
+    async def test_click_submits_the_buttons_label_as_a_user_message(self):
+        async with running_server(ShowUiPipeline) as uri, websockets.connect(uri) as ws:
+            room_id, live_room, button_id = await self._create_panel_with_replies(ws)
+            label = live_room.quick_reply_context[button_id]["label"]
+
+            await send_request(
+                ws, "/ui/event", {"component_id": button_id, "event": "click"}, room=room_id
+            )
+            # Matched on text, not just event=="message" — an earlier
+            # "message" event (echoing the "show-me-with-replies"
+            # prompt _create_panel_with_replies itself sent) is still
+            # sitting unread in the buffer at this point.
+            message = await recv_until(
+                ws, lambda m: m.get("event") == "message" and m["data"]["text"] == label
+            )
+            self.assertEqual(message["data"], {"role": "user", "text": label})
+
+    async def test_click_carries_panel_context_into_the_agents_next_turn(self):
+        async with running_server(ShowUiPipeline) as uri, websockets.connect(uri) as ws:
+            room_id, live_room, button_id = await self._create_panel_with_replies(ws)
+            label = live_room.quick_reply_context[button_id]["label"]
+
+            await send_request(
+                ws, "/ui/event", {"component_id": button_id, "event": "click"}, room=room_id
+            )
+            answer = await recv_until(
+                ws,
+                lambda m: m.get("event") == "answer" and "the user chose" in m["data"]["text"],
+            )
+            self.assertIn('Regarding the panel titled "Comparison"', answer["data"]["text"])
+            self.assertIn(f'the user chose: "{label}"', answer["data"]["text"])
+
+    async def test_unknown_quick_reply_id_is_rejected(self):
+        async with running_server(StubPipeline) as uri, websockets.connect(uri) as ws:
+            data = await send_request(ws, "/session/create", {"path": "."})
+            room_id = data["room"]
+            await recv_until(ws, lambda m: m.get("event") == "answer")
+
+            with self.assertRaises(AssertionError):
+                await send_request(
+                    ws,
+                    "/ui/event",
+                    {"component_id": "quick-doesnotexist", "event": "click"},
+                    room=room_id,
+                )
+
+    async def test_click_while_a_turn_is_active_is_silently_ignored(self):
+        async with running_server(ShowUiPipeline) as uri, websockets.connect(uri) as ws:
+            room_id, live_room, button_id = await self._create_panel_with_replies(ws)
+            label = live_room.quick_reply_context[button_id]["label"]
+
+            self.assertTrue(live_room.try_start_turn())
+            try:
+                resp = await send_request(
+                    ws,
+                    "/ui/event",
+                    {"component_id": button_id, "event": "click"},
+                    room=room_id,
+                )
+                self.assertEqual(resp, {"accepted": True})  # not an error...
+                # ...but no turn actually ran for it: no message event
+                # for the button's label ever arrives.
+                with self.assertRaises(TimeoutError):
+                    await recv_until(
+                        ws,
+                        lambda m: m.get("event") == "message"
+                        and m["data"]["text"] == label,
+                        timeout=0.3,
+                    )
+            finally:
+                live_room.turn_active = False
 
 
 class TestPersistenceAndResume(unittest.IsolatedAsyncioTestCase):

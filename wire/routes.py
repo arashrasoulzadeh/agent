@@ -344,19 +344,37 @@ async def _dispatch_quick_reply(
 ) -> None:
     """A show_ui quick-reply button click — unlike opt-N above (which
     only ever resolves against the *one* currently pending ask()
-    question), quick_reply_labels is never cleared, so a button from
+    question), quick_reply_context is never cleared, so a button from
     several turns back in the transcript's own scrollback stays
-    clickable — see Room.quick_reply_labels's own docstring for why.
-    Submits the button's label as an ordinary prompt, exactly as if the
-    user had typed and sent it themselves; silently ignored while a
-    turn is already running, same as an ordinary footer-input submit
-    (_dispatch_footer_submit above) in that state."""
-    label = room.quick_reply_labels.get(component_id)
-    if label is None:
+    clickable — see Room.quick_reply_context's own docstring for why.
+
+    Calls Room.run_prompt() directly (not the /prompt route above) so it
+    can pass a *different* `llm_text` than what's shown to the user —
+    the chat bubble stays exactly the button's own label, indistinguishable
+    from having typed and sent it, while the agent's next turn gets the
+    originating panel's title and a compact content summary
+    (_quick_reply_llm_text below) folded in as explicit context, since a
+    bare label alone ("Option A") means nothing without knowing which
+    panel it answered. Silently ignored while a turn is already running,
+    same as an ordinary footer-input submit (_dispatch_footer_submit
+    above) in that state — this is deliberately not exposed as a public
+    `llm_text` field on /prompt's own wire schema; it's an internal
+    detail of this one dispatch path, not a general client capability.
+    """
+    ctx = room.quick_reply_context.get(component_id)
+    if ctx is None:
         raise ProtocolError(f"unknown quick reply: {component_id!r}")
-    if room.turn_active:
+    if not room.try_start_turn():
         return
-    await prompt(transport, {"room": room.id, "text": label})
+    _fire(room.run_prompt(ctx["label"], llm_text=_quick_reply_llm_text(ctx)))
+
+
+def _quick_reply_llm_text(ctx: dict[str, str]) -> str:
+    title = ctx.get("title")
+    summary = ctx.get("summary")
+    where = f'the panel titled "{title}"' if title else "the panel shown above"
+    context = f" ({summary})" if summary else ""
+    return f'Regarding {where}{context}, the user chose: "{ctx["label"]}"'
 
 
 async def _dispatch_setting_submit(

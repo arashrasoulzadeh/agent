@@ -62,9 +62,25 @@ index.html    The page shell: a start screen, the mount point for the
 renderer.js   The generic renderer itself — connects, requests/applies
               ui.update ops, forwards clicks/submits to /ui/event.
               Read alongside ui/app.py when adding a feature to both.
+markdown.js   Pure logic split out of renderer.js so it's independently
+              unit tested (markdown.test.js): the markdown renderer and
+              the syntax highlighter fenced code blocks use. Exposed to
+              renderer.js via preload.js's contextBridge, not required
+              directly (renderer.js has no `require`).
 styles.css    Theme-aware (light/dark via prefers-color-scheme), no
               build step.
 ```
+
+## Tests
+
+```bash
+node --test desktop/markdown.test.js components/js/richStyle.test.js
+```
+
+Node's built-in test runner, no dependency added. Both files hold pure
+logic (markdown rendering, syntax highlighting, Rich-style-string ->
+CSS) with no DOM/Electron dependency, so they run directly under plain
+Node — no Electron launch needed for this level of coverage.
 
 ## Packaging
 

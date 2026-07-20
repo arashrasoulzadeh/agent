@@ -26,10 +26,16 @@ from typing import Any
 class Node:
     """One drawable element. `type` is one of a small, fixed vocabulary
     the client already knows how to render: "container" (props:
-    direction="vertical"|"horizontal"), "text" (props: text, style),
-    "input" (props: placeholder, password, value), "button" (props:
-    label), "list" (props: kind="log"|"options" — a plain growing
-    scrollback vs. a selectable option list)."""
+    direction="vertical"|"horizontal", optionally also panel=True with
+    panel_title/border_style/padding — a bordered/titled box around its
+    children), "text" (props: text, style, or spans: a list of
+    {text, style} runs, optionally format="markdown" and/or the same
+    panel props as above wrapping a single renderable), "input" (props:
+    placeholder, password, value), "button" (props: label), "list"
+    (props: kind="log"|"options" — a plain growing scrollback vs. a
+    selectable option list), "table" (props: headers, rows — a real
+    grid, not formatted text; see service/ui_builder.py's
+    agent_ui_node())."""
 
     type: str
     id: str

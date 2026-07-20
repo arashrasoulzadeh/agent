@@ -335,5 +335,160 @@ class TestRootTree(unittest.TestCase):
         self.assertEqual(_ids(footer), ["footer-info", "command-popup", "footer-input"])
 
 
+class TestAgentUiNode(unittest.TestCase):
+    """show_ui's compiler (tool/ui.py -> Room.show_ui -> here). One
+    Node in, no I/O — the same "pure function" contract every other
+    builder in this module follows, so a malformed LLM-authored block
+    is exercised directly, not just through a real tool call."""
+
+    def test_basic_shape_is_a_panel_container(self):
+        node = ui_builder.agent_ui_node(
+            "n1", "Comparison", [{"kind": "text", "text": "hi"}], []
+        )
+        self.assertEqual(node.type, "container")
+        self.assertTrue(node.props["panel"])
+        self.assertEqual(node.props["panel_title"], "✦ Comparison")
+        self.assertEqual(node.props["border_style"], "bright_cyan")
+
+    def test_no_title_falls_back_to_the_bare_icon(self):
+        node = ui_builder.agent_ui_node("n1", None, [], [])
+        self.assertEqual(node.props["panel_title"], "✦")
+
+    def test_one_child_per_block_in_order(self):
+        blocks = [{"kind": "text", "text": "a"}, {"kind": "text", "text": "b"}]
+        node = ui_builder.agent_ui_node("n1", None, blocks, [])
+        self.assertEqual(_ids(node), ["n1-block-0", "n1-block-1"])
+
+    def test_no_quick_replies_means_no_button_row(self):
+        node = ui_builder.agent_ui_node("n1", None, [], [])
+        self.assertEqual(node.children, [])
+
+    def test_quick_replies_become_a_trailing_horizontal_button_row(self):
+        replies = [{"id": "quick-1", "label": "Yes"}, {"id": "quick-2", "label": "No"}]
+        node = ui_builder.agent_ui_node("n1", None, [], replies)
+        row = node.children[-1]
+        self.assertEqual(row.id, "n1-replies")
+        self.assertEqual(row.props["direction"], "horizontal")
+        self.assertEqual([c.type for c in row.children], ["button", "button"])
+        self.assertEqual([c.id for c in row.children], ["quick-1", "quick-2"])
+        self.assertEqual([c.props["label"] for c in row.children], ["Yes", "No"])
+
+    def test_block_kind_text(self):
+        node = ui_builder.agent_ui_node("n1", None, [{"kind": "text", "text": "hi"}], [])
+        block = node.children[0]
+        self.assertEqual(block.type, "text")
+        self.assertEqual(block.props["text"], "hi")
+        self.assertNotIn("format", block.props)
+
+    def test_block_kind_markdown(self):
+        blocks = [{"kind": "markdown", "text": "**b**"}]
+        block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
+        self.assertEqual(block.props["format"], "markdown")
+        self.assertEqual(block.props["text"], "**b**")
+
+    def test_block_kind_table_is_a_real_table_node_not_formatted_text(self):
+        blocks = [{"kind": "table", "headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}]
+        block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
+        self.assertEqual(block.type, "table")
+        self.assertEqual(block.props["headers"], ["A", "B"])
+        self.assertEqual(block.props["rows"], [["1", "2"], ["3", "4"]])
+
+    def test_block_kind_table_coerces_every_cell_to_a_string(self):
+        blocks = [{"kind": "table", "headers": ["N"], "rows": [[1], [2.5]]}]
+        block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
+        self.assertEqual(block.props["rows"], [["1"], ["2.5"]])
+
+    def test_block_kind_table_skips_malformed_rows_instead_of_crashing(self):
+        blocks = [{"kind": "table", "headers": ["A"], "rows": [["ok"], "not-a-list", None]}]
+        block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
+        self.assertEqual(block.props["rows"], [["ok"]])
+
+    def test_block_kind_list_uses_colored_bullet_spans(self):
+        blocks = [{"kind": "list", "items": ["x", "y"]}]
+        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        bullets = [s for s in spans if s["text"] == "• "]
+        self.assertEqual(len(bullets), 2)
+        self.assertEqual(bullets[0]["style"], "bright_cyan")
+        self.assertEqual([s["text"] for s in spans if s["text"] in ("x", "y")], ["x", "y"])
+
+    def test_block_kind_list_empty_degrades_to_a_placeholder(self):
+        blocks = [{"kind": "list", "items": []}]
+        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        self.assertEqual(spans[0]["text"], "(empty list)")
+
+    def test_block_kind_facts_bolds_labels_and_right_aligns_to_the_longest(self):
+        blocks = [{"kind": "facts", "pairs": {"Rec": "pnpm", "Reason": "fast"}}]
+        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        labels = [s for s in spans if s["style"] == "bold bright_cyan"]
+        self.assertEqual(len(labels), 2)
+        self.assertTrue(labels[0]["text"].startswith("   Rec:"))  # padded to "Reason"'s 6 chars
+
+    def test_block_kind_facts_empty_degrades_to_a_placeholder(self):
+        blocks = [{"kind": "facts", "pairs": {}}]
+        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        self.assertEqual(spans[0]["text"], "(no facts given)")
+
+    def test_unrecognized_block_kind_degrades_to_a_visible_placeholder(self):
+        blocks = [{"kind": "nonsense", "x": 1}]
+        block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
+        self.assertIn("nonsense", block.props["text"])
+
+    def test_non_dict_block_renders_as_plain_text_instead_of_crashing(self):
+        block = ui_builder.agent_ui_node("n1", None, ["just a string"], []).children[0]
+        self.assertEqual(block.props["text"], "just a string")
+
+    def test_content_entry_node_delegates_the_agent_ui_kind(self):
+        node = ui_builder.content_entry_node(
+            "agent_ui",
+            "n1",
+            title="T",
+            blocks=[{"kind": "text", "text": "x"}],
+            quick_replies=[],
+        )
+        self.assertEqual(node.id, "n1")
+        self.assertEqual(node.props["panel_title"], "✦ T")
+
+
+class TestSummarizeBlocks(unittest.TestCase):
+    """The compact synopsis a clicked quick-reply folds into the agent's
+    next turn (wire/routes.py's _dispatch_quick_reply) — never shown to
+    the user, so what matters is that it stays short and never leaks raw
+    tabular data (a table's a row count away from blowing the token
+    budget this whole function exists to protect)."""
+
+    def test_joins_text_and_markdown_blocks(self):
+        summary = ui_builder.summarize_blocks(
+            [{"kind": "text", "text": "intro"}, {"kind": "markdown", "text": "**bold**"}]
+        )
+        self.assertIn("intro", summary)
+        self.assertIn("**bold**", summary)
+
+    def test_includes_list_items_inline(self):
+        summary = ui_builder.summarize_blocks([{"kind": "list", "items": ["a", "b"]}])
+        self.assertIn("a, b", summary)
+
+    def test_includes_facts_as_key_value_pairs(self):
+        summary = ui_builder.summarize_blocks([{"kind": "facts", "pairs": {"Rec": "pnpm"}}])
+        self.assertIn("Rec: pnpm", summary)
+
+    def test_table_mentions_headers_only_never_row_data(self):
+        summary = ui_builder.summarize_blocks(
+            [{"kind": "table", "headers": ["A", "B"], "rows": [["1", "2"]] * 50}]
+        )
+        self.assertIn("a table (A, B)", summary)
+        self.assertNotIn("1", summary)
+
+    def test_truncates_to_the_given_limit(self):
+        summary = ui_builder.summarize_blocks([{"kind": "text", "text": "x" * 500}], limit=50)
+        self.assertLessEqual(len(summary), 50)
+
+    def test_empty_blocks_gives_an_empty_summary(self):
+        self.assertEqual(ui_builder.summarize_blocks([]), "")
+
+    def test_malformed_blocks_are_skipped_not_crashed_on(self):
+        summary = ui_builder.summarize_blocks(["not-a-dict", {"kind": "text", "text": "ok"}])
+        self.assertEqual(summary, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

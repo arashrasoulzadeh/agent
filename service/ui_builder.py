@@ -221,56 +221,80 @@ def settings_modal_node(settings: list[dict[str, Any]]) -> Node:
     )
 
 
-def _format_list(items: Any) -> str:
-    if not isinstance(items, list):
-        return str(items)
-    return "\n".join(f"• {item}" for item in items)
+def _list_spans(items: Any) -> list[tuple[str, str]]:
+    """Colored bullets rather than plain "• " text — reuses the existing
+    `spans` prop (a "text" node's multi-run styling, already fully
+    supported by both clients) instead of a new node type, since a
+    bullet list is still fundamentally one run of text per item."""
+    if not isinstance(items, list) or not items:
+        return [("(empty list)", INFO)]
+    spans: list[tuple[str, str]] = []
+    for i, item in enumerate(items):
+        spans.append(("• ", "bright_cyan"))
+        spans.append((str(item), INFO))
+        if i < len(items) - 1:
+            spans.append(("\n", INFO))
+    return spans
 
 
-def _format_facts(pairs: Any) -> str:
+def _facts_spans(pairs: Any) -> list[tuple[str, str]]:
+    """Bold accent-colored labels, plain values — same reasoning as
+    _list_spans above: a label/value line is one text run per line, not
+    a grid, so `spans` earns its keep here where `table` (a real Node
+    type, above) wouldn't."""
     if not isinstance(pairs, dict) or not pairs:
-        return ""
+        return [("(no facts given)", INFO)]
     label_width = max(len(str(k)) for k in pairs)
-    return "\n".join(f"{str(k).rjust(label_width)}:  {v}" for k, v in pairs.items())
+    spans: list[tuple[str, str]] = []
+    items = list(pairs.items())
+    for i, (key, value) in enumerate(items):
+        spans.append((f"{str(key).rjust(label_width)}:  ", "bold bright_cyan"))
+        spans.append((str(value), INFO))
+        if i < len(items) - 1:
+            spans.append(("\n", INFO))
+    return spans
 
 
-def _format_table(headers: Any, rows: Any) -> str:
-    """A small ASCII table, column-aligned with plain spaces — no markup,
-    no box-drawing characters. Deliberately not a Rich Table/HTML
-    <table>: this is a plain "text" Node like every other block, so it
-    renders correctly through the exact same path a plain string does on
-    both clients (a terminal is always monospace; desktop's #content is
-    set to the same monospace font specifically so this alignment
-    survives there too — see desktop/styles.css's #content rule)."""
+def _table_node(node_id: str, headers: Any, rows: Any) -> Node:
+    """A `table` block compiles to a real `type="table"` Node — its own
+    primitive, not a formatted "text" block — rendered as a genuine
+    table by each client in its own best way: `ui/app.py` builds a
+    `rich.table.Table` (native box-drawing, right at home in a
+    terminal); `desktop/renderer.js` builds a real HTML `<table>`. Both
+    are meaningfully more legible than the column-padded plain text this
+    used to flatten into — the "change the struct as much as you want"
+    invitation this feature grew out of, spent on the one block kind
+    where a real grid actually earns its keep."""
     headers = [str(h) for h in headers] if isinstance(headers, list) else []
     str_rows = [
         [str(cell) for cell in row]
         for row in (rows if isinstance(rows, list) else [])
         if isinstance(row, list)
     ]
-    if not headers and not str_rows:
-        return ""
+    return Node(type="table", id=node_id, props={"headers": headers, "rows": str_rows})
 
-    widths = [len(h) for h in headers]
-    for row in str_rows:
-        for i, cell in enumerate(row):
-            if i >= len(widths):
-                widths.append(len(cell))
-            else:
-                widths[i] = max(widths[i], len(cell))
 
-    def _fmt_row(cells: list[str]) -> str:
-        return "  ".join(
-            cell.ljust(widths[i]) if i < len(widths) else cell
-            for i, cell in enumerate(cells)
-        )
-
-    lines = []
-    if headers:
-        lines.append(_fmt_row(headers))
-        lines.append("  ".join("-" * w for w in widths))
-    lines.extend(_fmt_row(row) for row in str_rows)
-    return "\n".join(lines)
+def summarize_blocks(blocks: list[Any], limit: int = 160) -> str:
+    """A compact, single-line synopsis of a show_ui call's blocks — used
+    when a quick-reply is clicked (wire/routes.py's _dispatch_quick_reply)
+    to give the *agent's* next turn textual context about which panel the
+    click came from, without repeating the whole panel verbatim into
+    what's actually shown to the user (which stays just the button's own
+    label — see Room.run_prompt()'s `llm_text` split)."""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("kind")
+        if kind in ("text", "markdown"):
+            parts.append(str(block.get("text", "")))
+        elif kind == "list" and isinstance(block.get("items"), list):
+            parts.append(", ".join(str(i) for i in block["items"]))
+        elif kind == "facts" and isinstance(block.get("pairs"), dict):
+            parts.append(", ".join(f"{k}: {v}" for k, v in block["pairs"].items()))
+        elif kind == "table" and isinstance(block.get("headers"), list):
+            parts.append(f"a table ({', '.join(str(h) for h in block['headers'])})")
+    return preview(" — ".join(p for p in parts if p), limit)
 
 
 def _block_node(node_id: str, block: Any) -> Node:
@@ -292,11 +316,11 @@ def _block_node(node_id: str, block: Any) -> Node:
     if kind == "text":
         return _text(node_id, str(block.get("text", "")), INFO)
     if kind == "list":
-        return _text(node_id, _format_list(block.get("items", [])), INFO)
+        return _spans(node_id, _list_spans(block.get("items", [])))
     if kind == "facts":
-        return _text(node_id, _format_facts(block.get("pairs")), INFO)
+        return _spans(node_id, _facts_spans(block.get("pairs")))
     if kind == "table":
-        return _text(node_id, _format_table(block.get("headers"), block.get("rows")), INFO)
+        return _table_node(node_id, block.get("headers"), block.get("rows"))
     return _text(node_id, f"[unrecognized block kind {kind!r}]", INFO)
 
 
@@ -345,7 +369,11 @@ def agent_ui_node(
         props={
             "direction": "vertical",
             "panel": True,
-            "panel_title": title,
+            # "✦ " marks this panel as agent-built at a glance — the one
+            # visual cue distinguishing it from a plain answer panel
+            # (grey35 border, no title) or an error panel (red,
+            # "error") since both use the exact same primitive.
+            "panel_title": f"✦ {title}" if title else "✦",
             "border_style": "bright_cyan",
             "padding": [1, 2],
         },

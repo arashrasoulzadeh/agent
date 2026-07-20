@@ -34,13 +34,16 @@ and pushes back whatever ui.update ops follow.
 import asyncio
 import json
 import logging
+import math
 import re
 import uuid
 from typing import Any
 
 import websockets
+from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from textual.app import App
 from textual.binding import Binding
@@ -58,6 +61,22 @@ from textual.widgets.option_list import Option
 # code change here — see components/__init__.py's own docstring for the
 # full "one spec, one place" rationale this mirrors on the wire instead
 # of at import time.
+
+
+def _estimate_tokens(text: str) -> int:
+    """A fast, dependency-free approximation shown to the user before
+    they send — not a real tokenizer, ~4 characters per token (the
+    commonly-cited rule of thumb for English text), rounded up. Good
+    enough for "roughly how much will this cost", not for anything
+    metering/billing needs to be exact about. desktop/renderer.js's
+    estimateTokens() uses the identical formula so the number reads the
+    same on both clients; duplicated rather than shared via components/
+    since it's a trivial, stateless algorithm, not server-owned UI data
+    — unlike the vocabulary this module's own top-of-file note explains
+    fetching from the server instead of importing directly."""
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / 4))
 
 
 _GREY_RAMP = re.compile(r"^gr[ae]y\d+$")
@@ -238,6 +257,7 @@ class AgentApp(App):
         self._widgets: dict[str, Widget] = {}
         self._node_type: dict[str, str] = {}
         self._modal_slot: Vertical | None = None
+        self._token_hint: Static | None = None
         self._command_options: list[tuple[str, str]] = []
         self._connection_state = "connecting"
         # Populated by _connect()'s /ui/spec fetch, before anything else
@@ -470,6 +490,24 @@ class AgentApp(App):
         self._modal_slot = Vertical(id="modal-slot")
         root_widget = self._build(tree)
         await self.mount(root_widget, self._modal_slot)
+        # A client-owned status line, mounted once as an extra sibling
+        # inside the server's own "footer" container — safe because
+        # nothing in the protocol ever replaces "footer" itself, only
+        # "footer-info"/"footer-input" individually by their own id (see
+        # service/rooms.py's _state_ops()), so this widget is never
+        # touched by an incoming ui.update op. Same trick as
+        # connection-status/modal-slot: client-local cosmetics live
+        # outside the tree the server actually rebuilds. Must happen
+        # *before* _root_mounted.set() below: that call wakes the
+        # ui.update apply loop, and a concurrent op replacing
+        # footer-info/footer-input mounts into this same "footer"
+        # parent — interleaving that mount with this one corrupts
+        # Textual's node bookkeeping (DuplicateIds), since both race on
+        # the same parent's children list.
+        footer = self._widgets.get("footer")
+        if footer is not None:
+            self._token_hint = Static(Text(""), id="token-hint")
+            await footer.mount(self._token_hint)
         self._modal_slot.display = False
         self._set_connection_status("connected")
         self._root_mounted.set()
@@ -579,6 +617,25 @@ class AgentApp(App):
         elif node_type == "list":  # kind == "log" — the content transcript
             children = [self._build(c) for c in node.get("children", [])]
             widget = VerticalScroll(*children, id=node_id)
+        elif node_type == "table":
+            # A show_ui table block (service/ui_builder.py's
+            # _table_node()) — a real Rich Table, not formatted text;
+            # the desktop equivalent is a real HTML <table>
+            # (desktop/renderer.js's buildTable()).
+            headers = props.get("headers") or []
+            table = Table(
+                show_header=bool(headers),
+                header_style="bold bright_cyan",
+                border_style="grey50",
+                box=box.SIMPLE_HEAD if headers else box.SIMPLE,
+                expand=False,
+                pad_edge=False,
+            )
+            for header in headers:
+                table.add_column(str(header))
+            for row in props.get("rows") or []:
+                table.add_row(*[str(cell) for cell in row])
+            widget = Static(table, id=node_id)
         else:
             raise ValueError(f"unknown node: {node!r}")
 
@@ -612,12 +669,25 @@ class AgentApp(App):
         if widget is not None:
             widget.update(self._render_header_status())
 
+    # ---- token estimate (client-local cosmetic, like the spinner) ---------
+
+    def _update_token_hint(self, value: str) -> None:
+        if self._token_hint is None:
+            return
+        count = _estimate_tokens(value)
+        if not count:
+            self._token_hint.update(Text(""))
+            return
+        label = "token" if count == 1 else "tokens"
+        self._token_hint.update(Text(f"  ~{count} {label}", style="grey62"))
+
     # ---- command popup (client-local filtering only) -----------------------
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "footer-input":
             return
         self._update_command_popup(event.value)
+        self._update_token_hint(event.value)
 
     def _update_command_popup(self, value: str) -> None:
         popup = self._widgets.get("command-popup")

@@ -483,6 +483,18 @@ input:focus {
 #footer-input::placeholder { color: var(--text-faint); }
 #footer-input:focus { outline: none; }
 
+/* A client-owned sibling inside #footer (renderer.js's mountRoot()) —
+   an approximate token count for the currently-typed message, updated
+   live as the user types. Empty (no layout jump) until there's
+   something to show. */
+.token-hint {
+  padding: 0 22px 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: right;
+}
+
 /* ---- transcript text --------------------------------------------------- */
 
 .span-line, .plain-text {
@@ -633,6 +645,43 @@ input:focus {
 }
 .markdown-body ul, .markdown-body ol { margin: 0.5em 0; padding-left: 24px; }
 .markdown-body li { margin: 0.2em 0; }
+
+/* ---- native table (a show_ui "table" block — a real Node type, not
+   formatted text; see service/ui_builder.py's _table_node()) -------- */
+
+.node-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.node-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.node-table th, .node-table td {
+  padding: 6px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.node-table thead th {
+  background: var(--bg-elevated-2);
+  color: var(--accent);
+  font-weight: 700;
+  border-bottom: 1px solid var(--border);
+}
+
+.node-table tbody td {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.node-table tbody tr:last-child td { border-bottom: none; }
+.node-table tbody tr:nth-child(even) { background: rgba(var(--accent-rgb), 0.04); }
+.node-table tbody tr:hover { background: rgba(var(--accent-rgb), 0.1); }
 
 /* ---- command popup ------------------------------------------------- */
 

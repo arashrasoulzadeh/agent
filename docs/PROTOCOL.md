@@ -160,7 +160,10 @@ it is built server-side by `service/ui_builder.py`.
   (`props`: `placeholder`, `password`, `value`), `"button"` (`props`:
   `label`), `"list"` (`props.kind`: `"log"` — a plain growing
   scrollback, the content transcript; or `"options"` — a selectable
-  list, the command popup).
+  list, the command popup), `"table"` (`props`: `headers` — a list of
+  strings; `rows` — a list of lists of strings — a real grid, not
+  pre-formatted text; `ui/app.py` renders a `rich.table.Table`,
+  `desktop/renderer.js` a real `<table>`).
 - `id` — stable, meaningful, and reused across updates to the same
   thing: `"header"`, `"footer-info"`, `"footer-input"`, `"content"`
   (the transcript), `"modal"`, `"command-popup"`, `"connection-status"`
@@ -168,7 +171,7 @@ it is built server-side by `service/ui_builder.py`.
   `f"setting-{key}"` / `f"setting-{key}-row"` / `f"setting-{key}-label"`
   (a settings field and its row/label), `f"quick-{uuid4().hex}"` (a
   `show_ui` quick-reply button — unlike `opt-{i}`, never reused or
-  recycled: each call mints fresh ids, and `Room.quick_reply_labels`
+  recycled: each call mints fresh ids, and `Room.quick_reply_context`
   keeps every one ever created resolvable for the room's whole life, not
   just the most recent).
 
@@ -221,7 +224,7 @@ a submit on `footer-input` means `/reply` (awaiting one), `/resync`
 (awaiting a confirm), a recognized `/`-command, or an ordinary
 `/prompt`, in that priority order; a click on `opt-{i}` resolves
 against the room's currently pending question's own option list; a
-click on `quick-{...}` resolves against `Room.quick_reply_labels` and
+click on `quick-{...}` resolves against `Room.quick_reply_context` and
 submits the button's own label as an ordinary `/prompt` — indistinguishable,
 server-side, from the user having typed and sent that same text; a
 submit on `setting-{key}` calls `/settings/update` and re-pushes the

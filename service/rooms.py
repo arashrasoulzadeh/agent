@@ -345,13 +345,18 @@ class Room:
         # whenever no question with buttons is outstanding.
         self.pending_options: list[str] | None = None
         # Every quick-reply button any show_ui call has ever created in
-        # this room, id -> label — unlike pending_options above, never
-        # cleared: a quick-reply row stays visible (and clickable) in
-        # the transcript's own scrollback long after the turn that
-        # created it ends, so an id from three turns ago must still
-        # resolve. wire/routes.py's /ui/event reads this the same way
-        # it reads pending_options for "opt-N".
-        self.quick_reply_labels: dict[str, str] = {}
+        # this room, id -> {"label", "title", "summary"} — unlike
+        # pending_options above, never cleared: a quick-reply row stays
+        # visible (and clickable) in the transcript's own scrollback
+        # long after the turn that created it ends, so an id from three
+        # turns ago must still resolve. wire/routes.py's /ui/event reads
+        # this the same way it reads pending_options for "opt-N"; "title"
+        # and "summary" (service/ui_builder.py's summarize_blocks()) are
+        # what let a click carry the panel's own context into the
+        # agent's next turn without repeating it in the chat bubble
+        # itself, which stays just "label" — see Room.run_prompt()'s
+        # `llm_text` split.
+        self.quick_reply_context: dict[str, dict[str, str]] = {}
 
         # Fresh each time, reading whatever ROOMS_DIR currently is — this
         # is what lets tests/stubs.py's `rooms.ROOMS_DIR = tmp_dir`
@@ -644,9 +649,27 @@ class Room:
             if resync_info is not None:
                 self.resync_suggested = True
             await self._finish_turn_with_answer(cached_answer, resync_info)
-            return
+        else:
+            await self._run_turn(BOOTSTRAP_QUERY, cache_after=True)
 
-        await self._run_turn(BOOTSTRAP_QUERY, cache_after=True)
+        await self._show_capability_tip()
+
+    async def _show_capability_tip(self) -> None:
+        """A one-time nudge, shown once per room right after its very
+        first bootstrap answer — run_bootstrap() only ever runs once, on
+        Room.create(), never on a resumed room, so this can never repeat
+        on the same room. "info" (not persisted — see content_entry_node
+        via append_content's own docstring) is exactly right here: a
+        client connected right now sees it; a later /session/resume
+        correctly never replays it, matching a real one-time tip rather
+        than a permanent transcript entry."""
+        await self.append_content(
+            "info",
+            text=(
+                "Tip: I can also show interactive panels — comparisons, "
+                "tables, quick-reply buttons — not just text, when it helps."
+            ),
+        )
 
     async def run_resync(self) -> None:
         """Assumes try_start_turn() already succeeded — the confirmed
@@ -858,14 +881,23 @@ class Room:
         await self.broadcast_state()
         self.save()
 
-    async def run_prompt(self, text: str) -> None:
-        """Assumes try_start_turn() already succeeded."""
+    async def run_prompt(self, text: str, *, llm_text: str | None = None) -> None:
+        """Assumes try_start_turn() already succeeded. `text` is what the
+        user sees — the transcript entry and the echoed `message` event —
+        while `llm_text` (defaulting to `text` itself for an ordinary
+        typed prompt, where the two are identical) is what actually
+        reaches the agent. They diverge for exactly one caller today:
+        wire/routes.py's `_dispatch_quick_reply`, so a clicked button's
+        chat bubble stays as clean as the label it showed while the
+        agent's next turn still gets the panel context that click came
+        from (Room.quick_reply_context, service/ui_builder.py's
+        summarize_blocks())."""
         self.status_label = "thinking"
         await self.broadcast_state()
         self.append_transcript({"type": "message", "role": "user", "text": text})
         await self._emit(events.MESSAGE, {"role": "user", "text": text})
         await self.append_content("message", text=text, role="user")
-        await self._run_turn(text)
+        await self._run_turn(llm_text if llm_text is not None else text)
 
     async def _run_turn(self, question: str, cache_after: bool = False) -> None:
         answer: str | None = None
@@ -945,16 +977,19 @@ class Room:
 
         Generates each quick-reply button's id here (not in
         ui_builder.agent_ui_node(), which stays a pure compiler) and
-        registers it into quick_reply_labels *before* broadcasting the
+        registers it into quick_reply_context *before* broadcasting the
         node that displays it — a click racing in before that update
         finishes would otherwise resolve against an id the dict doesn't
         know yet.
         """
+        summary = ui_builder.summarize_blocks(blocks)
         pairs = [
             {"id": f"quick-{uuid.uuid4().hex}", "label": str(label)}
             for label in (quick_replies or [])[:6]
         ]
-        self.quick_reply_labels.update({p["id"]: p["label"] for p in pairs})
+        self.quick_reply_context.update(
+            {p["id"]: {"label": p["label"], "title": title, "summary": summary} for p in pairs}
+        )
         ops = self._content_ops("agent_ui", title=title, blocks=blocks, quick_replies=pairs)
         self.broadcast_ui_now(ops)
         self.append_transcript(

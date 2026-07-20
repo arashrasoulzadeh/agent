@@ -129,7 +129,13 @@ than hardcoded in the client — `cli.py` presents it, it doesn't decide it.
 
 Type follow-up questions into the input at the bottom. `exit`, `quit`, or `q`
 ends the session. Scroll the transcript with arrow keys, PageUp/PageDown, or
-the mouse wheel — it never scrolls your terminal itself.
+the mouse wheel — it never scrolls your terminal itself. As you type, a
+small `~N tokens` line under the input gives a rough, live estimate of
+what you're about to send — a fast client-local approximation (~4
+characters/token, never a real tokenizer or a server round trip), not an
+exact count; both clients compute it with the identical formula
+(`ui/app.py`'s `_estimate_tokens()`, `desktop/renderer.js`'s
+`estimateTokens()`) so the number reads the same either way.
 
 Prefer a native window over the terminal? `desktop/` is a cross-platform
 Electron app that connects to the same running `agent-server` and renders
@@ -515,41 +521,70 @@ spec data, to `desktop/renderer.js`.
 
 The payoff of everything above: `tool/ui.py`'s `show_ui` tool lets the
 *agent itself* decide to draw a bordered panel — not just write prose —
-and it renders identically on both clients with zero client-specific
-code for this feature beyond one generic protocol extension (below).
-The LLM never sees a `Node`; it calls `show_ui` with a small, forgiving
-vocabulary of block kinds (`text`, `markdown`, `list`, `facts`, `table`)
-plus an optional `title` and up to 6 `quick_replies`, and
-`service/ui_builder.py`'s `agent_ui_node()` compiles that into an
-ordinary `container` Node — a bordered/titled panel (`props.panel`,
-`panel_title`, `border_style`) holding one text node per block and a row
-of quick-reply buttons — the exact same primitives every other screen in
-this app already uses. `list`/`facts`/`table` blocks are rendered as
-column-aligned plain text rather than a new node type, since a terminal
-(and `desktop/`'s `#content`, deliberately kept monospace — see
-"Components" above) is already a fixed-width grid; no new client
-rendering code was needed for any of the five block kinds.
+and it renders identically on both clients. The LLM never sees a
+`Node`; it calls `show_ui` with a small, forgiving vocabulary of block
+kinds (`text`, `markdown`, `list`, `facts`, `table`) plus an optional
+`title` and up to 6 `quick_replies`, and `service/ui_builder.py`'s
+`agent_ui_node()` compiles that into a bordered/titled `container` Node
+(`props.panel`, `panel_title`, `border_style`) holding one child per
+block plus a row of quick-reply buttons.
 
-The one genuinely new piece is that `props.panel` now works on a
-`container` node, not just a `text` node — `ui/app.py`'s `_build()` sets
-the *widget's own* Textual border/`border_title` (a different color
-vocabulary than Rich's own `Panel`, hence `_textual_color()`'s small
-translation table there), and `desktop/renderer.js`'s `build()` reuses
-its existing text-panel CSS classes (`applyPanelChrome()`) on a
-container instead. Everything else — routing the tool call to whichever
-room is running it without a dependency cycle (`core/ui_context.py`,
-mirroring `core/ask_context.py`'s own contextvar pattern exactly),
-generating and persisting each quick-reply button's id
-(`Room.show_ui()`, `service/rooms.py`), and resolving a click back to a
-prompt (`wire/routes.py`'s `/ui/event` dispatch, a `quick-` id prefix
-alongside the existing `opt-`/`setting-` ones) — is just this project's
-existing patterns applied once more, not new mechanisms.
+Two genuinely new pieces make that panel richer than the rest of the
+app's usual monospace-text furniture, both deliberate uses of "change
+the struct as much as you want":
+
+- `props.panel` now works on a `container` node, not just a `text`
+  node — `ui/app.py`'s `_build()` sets the *widget's own* Textual
+  border/`border_title` (a different color vocabulary than Rich's own
+  `Panel`, hence `_textual_color()`'s small translation table there),
+  and `desktop/renderer.js`'s `build()` reuses its existing text-panel
+  CSS classes (`applyPanelChrome()`) on a container instead.
+- `"table"` is a real sixth `Node` type (`props.headers`/`rows`), not
+  formatted text — `ui/app.py` builds a genuine `rich.table.Table`,
+  `desktop/renderer.js` a real `<table>`. `list` and `facts` blocks stay
+  text (styled `spans` — colored bullets, bold-accent labels — rather
+  than a new node type each), since a bullet list or a label/value pair
+  doesn't need a grid the way tabular data does.
+
+Everything else — routing the tool call to whichever room is running it
+without a dependency cycle (`core/ui_context.py`, mirroring
+`core/ask_context.py`'s own contextvar pattern exactly), generating and
+persisting each quick-reply button's id (`Room.show_ui()`,
+`service/rooms.py`), and resolving a click back to a prompt
+(`wire/routes.py`'s `/ui/event` dispatch, a `quick-` id prefix alongside
+the existing `opt-`/`setting-` ones) — is just this project's existing
+patterns applied once more, not new mechanisms.
 
 A quick-reply click submits its label as an ordinary `/prompt`, exactly
 as if typed and sent — and unlike an `ask()` question's option buttons
 (cleared the moment it's answered), a `show_ui` quick-reply stays
 clickable for as long as it's visible in the transcript's own
 scrollback, even turns later.
+
+**What the user sees and what the agent gets are deliberately split.**
+The chat bubble a clicked quick-reply produces is exactly the button's
+own label — indistinguishable from having typed and sent that text —
+but the agent's *next turn* receives more: `Room.run_prompt()` takes an
+optional `llm_text` that, when given, is what actually reaches the
+agent while `text` is still what's shown and persisted. `_dispatch_quick_reply`
+(`wire/routes.py`) builds that `llm_text` from the originating panel's
+title and a compact one-line synopsis of its blocks
+(`service/ui_builder.py`'s `summarize_blocks()`) — e.g. `Regarding the
+panel titled "Comparison" (npm vs pnpm...), the user chose: "Use npm"`
+— so a bare, ambiguous label like "Use npm" always arrives with the
+context of which panel it answered, without cluttering the transcript
+the human actually reads.
+
+Every panel's own title also gets a `✦` prefix (`agent_ui_node()`), the
+one visual cue distinguishing agent-built structured content from a
+plain answer panel (grey border, no title) or an error panel (red,
+titled "error") at a glance, since all three share the exact same
+underlying primitive. A brand-new room additionally gets a one-time
+"Tip: I can also show interactive panels..." line right after its first
+bootstrap answer (`Room._show_capability_tip()`) — the one place someone
+who's never used this feature would otherwise have no way to discover
+it exists; it's an ephemeral "info" entry, so it never repeats on a
+later `/session/resume`.
 
 ### Hooks
 
