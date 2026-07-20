@@ -707,6 +707,96 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(popup.display)
 
+    async def test_enter_accepts_pre_prompt_action_by_inserting_its_expansion(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+                app.query_one("#footer-input", Input).focus()
+
+                await pilot.press(*"/expl")
+                await pilot.pause(0.05)
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+
+                self.assertEqual(
+                    app.query_one("#footer-input", Input).value,
+                    ACTIONS["/explain"].text,
+                )
+                self.assertFalse(app.query_one("#command-popup", OptionList).display)
+
+    async def test_enter_accepts_post_prompt_action_by_inserting_its_expansion(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+                app.query_one("#footer-input", Input).focus()
+
+                await pilot.press(*"/tld")
+                await pilot.pause(0.05)
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+
+                self.assertEqual(
+                    app.query_one("#footer-input", Input).value,
+                    ACTIONS["/tldr"].text,
+                )
+
+    async def test_expansion_text_is_backspace_deletable_like_normal_input(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+                app.query_one("#footer-input", Input).focus()
+
+                await pilot.press(*"/expl")
+                await pilot.pause(0.05)
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                inserted = ACTIONS["/explain"].text
+
+                await pilot.press("backspace")
+                await pilot.pause(0.05)
+
+                self.assertEqual(
+                    app.query_one("#footer-input", Input).value, inserted[:-1]
+                )
+
+    async def test_click_accepts_pre_prompt_action_by_inserting_its_expansion(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+                app.query_one("#footer-input", Input).focus()
+                popup = app.query_one("#command-popup", OptionList)
+
+                await pilot.press("/")
+                await pilot.pause(0.05)
+                popup.highlighted = 1  # "/explain"
+                popup.action_select()
+                await pilot.pause(0.05)
+
+                self.assertEqual(
+                    app.query_one("#footer-input", Input).value,
+                    ACTIONS["/explain"].text,
+                )
+
+    async def test_action_kind_still_inserts_the_bare_command_not_an_expansion(self):
+        async with running_server(StubPipeline) as uri:
+            app = AgentApp(uri, ".")
+            async with app.run_test(size=(100, 40)) as pilot:
+                await wait_idle(app)
+                app.query_one("#footer-input", Input).focus()
+
+                await pilot.press(*"/ad")
+                await pilot.pause(0.05)
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+
+                self.assertEqual(
+                    app.query_one("#footer-input", Input).value, "/add "
+                )
+
     async def test_popup_stays_hidden_while_awaiting_reply(self):
         async with running_server(AskToolPipeline) as uri:
             app = AgentApp(uri, ".")

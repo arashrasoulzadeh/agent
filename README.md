@@ -206,6 +206,8 @@ llm/        the LLM client (get_llm), dispatching to one of llm/providers/
             (gapgpt, anthropic, ollama) by LLM_PROVIDER, plus a shared
             raw-IO logging callback
 tool/       every capability the agent has, one file per tool, auto-discovered
+actions/    every `/`-command the command popup offers, one file per action,
+            auto-discovered the same way as tool/ — see Slash commands, below
 agent/      the reasoning engine: ProjectPipeline, ProjectAnalyst, the
             Stage/Pipeline system, ContextSynthesizer — framework-free,
             takes its llm/tools/sink as constructor arguments
@@ -379,6 +381,70 @@ startup and graceful shutdown (SIGINT/SIGTERM). See
 [`docs/MODULES.md`](docs/MODULES.md) for the full contract, a worked
 example, and how to write, register, and test a new tool — third-party
 tools need nothing beyond that document and `core/guard.py`/`core/module.py`.
+
+### Slash commands (`actions/`)
+
+Every `/`-command the popup offers — `/add`, `/remove`, `/projects`,
+`/settings`, `/explain`, `/tldr` — is one `Action` (`core/action.py`) in
+one file under `actions/`, auto-discovered by
+`core/action_registry.py`'s `discover_actions()` (`ACTIONS_DIR = actions/`,
+same `import_all()` pattern `tool/registry.py` uses for `AGENT_TOOLS`).
+Dropping a new `action = Action(...)`-defining module into `actions/` is
+enough to add a command to both clients — `service/ui_builder.py`'s
+`command_list_node()` iterates `actions.ACTIONS` to build the popup, so
+nothing about `ui/app.py` or `desktop/renderer.js` changes either.
+
+Each `Action` has a `kind`, and `kind` decides everything about what
+accepting it does:
+
+| Kind | Behavior | Examples |
+| --- | --- | --- |
+| `"action"` | Runs server-side against a narrow `ActionContext`, then reports back (usually via `info`). | `/add`, `/remove`, `/projects` |
+| `"ui"` | Same as `"action"`, but expected to push a modal or full-screen UI rather than just report text. | `/settings` |
+| `"pre_prompt"` | **Never reaches the server.** Accepting it replaces the footer input's value outright with the action's own `text`, in place of the bare command — from there it's ordinary, backspace-deletable input text. | `/explain` → `"Explain step by step: "` |
+| `"post_prompt"` | Same client-local expansion mechanic as `pre_prompt`; the two only differ in the *convention* for where the inserted text is meant to sit relative to what you type next. | `/tldr` → `" Answer in one short sentence."` |
+
+```python
+# actions/tldr.py
+from core.action import Action
+
+action = Action(
+    name="/tldr",
+    usage="/tldr",
+    description="Answer in one short sentence",
+    kind="post_prompt",
+    text=" Answer in one short sentence.",
+)
+```
+
+`"action"`/`"ui"` commands instead define an async `run(ctx, args)` and
+pass it as `Action(..., run=_run)`:
+
+```python
+# actions/remove.py
+from core.action import Action, ActionContext
+
+async def _run(ctx: ActionContext, args: list[str]) -> None:
+    if not args:
+        await ctx.info("Usage: /remove <name>")
+        return
+    await ctx.remove_project(args[0])
+
+action = Action(name="/remove", usage="/remove <name>",
+                 description="Detach a project", kind="action", run=_run)
+```
+
+`ActionContext` is a `Protocol` (`add_project`, `remove_project`,
+`show_settings`, `show_panel`, `info`, `project_list`) — deliberately
+narrow so `actions/` never needs to import `service/` or `wire/`
+(`wire/routes.py`'s `_RouteActionContext` is the concrete adapter that
+implements it; `make deps-check` enforces the boundary, same as
+`agent/`'s and `workspace/`'s). Both clients apply the `pre_prompt`/
+`post_prompt` expansion locally and identically —
+`ui/app.py`'s `_apply_popup_selection()`, `desktop/renderer.js`'s
+`applyPopupSelection()` — since it's client-typing-area state, not
+room state, exactly like the connection-status/spinner/token-hint
+pieces `docs/PROTOCOL.md` already calls out as client-local.
 
 ### Service: rooms
 

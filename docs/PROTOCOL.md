@@ -214,23 +214,54 @@ server-owned room state:
 inside the initial `tree`) and filtered client-side as the user types
 — prefix-matching a few dozen already-downloaded rows needs no round
 trip. Only a completed submit (Enter, or a click) ever produces a
-request. "exit"/"quit"/"q" are intercepted the same way, before a
-footer-input submit for them is ever sent — terminating the client
-process isn't room state either.
+request — *except* for `pre_prompt`/`post_prompt` actions, which never
+produce a request at all (see below). "exit"/"quit"/"q" are intercepted
+the same way, before a footer-input submit for them is ever sent —
+terminating the client process isn't room state either.
+
+**Every `/`-command is one of four `kind`s** (`core/action.py`'s
+`Action`, auto-discovered from `actions/*.py` by
+`core/action_registry.py`, same `import_all()` pattern as `tool/`'s
+registry). Each popup row carries its `kind` and, for the two
+client-local kinds, an `expansion` string:
+
+- `"action"` / `"ui"` — server-dispatched, same as any other command
+  always was: accepting the row inserts `"{name} "` into the input,
+  and only a later submit sends `/ui/event`. The one difference
+  between the two: a `"ui"` action (e.g. `/settings`) is expected to
+  push a modal or similar; an `"action"` (e.g. `/add`, `/remove`,
+  `/projects`) just does something and reports back via `info`. Both
+  run server-side against a narrow `ActionContext` (`add_project`,
+  `remove_project`, `show_settings`, `show_panel`, `info`,
+  `project_list`) — never the full room/transport — so `actions/`
+  stays a `core/`-only leaf package, like `tool/` (`make deps-check`
+  enforces this).
+- `"pre_prompt"` / `"post_prompt"` — **client-local, never reaches the
+  server.** Accepting the row (Enter or click) replaces the input's
+  value outright with the action's own `expansion` text (e.g.
+  `/explain` → `"Explain step by step: "`) instead of the bare
+  `"{name} "`. From there it's just ordinary editable input text —
+  keep typing to fill in the rest, backspace to shorten or delete it
+  like any other character, no special-cased undo. A `post_prompt`
+  differs only in *where* its text lands relative to what the user
+  types (a prefix vs. a suffix is a client-typing-order convention,
+  not a protocol distinction — both are just "insert this text").
 
 **Every other interaction is one `/ui/event` request** — a click, an
 Enter submit, a selection — dispatched server-side by `component_id`:
 a submit on `footer-input` means `/reply` (awaiting one), `/resync`
-(awaiting a confirm), a recognized `/`-command, or an ordinary
-`/prompt`, in that priority order; a click on `opt-{i}` resolves
-against the room's currently pending question's own option list; a
-click on `quick-{...}` resolves against `Room.quick_reply_context` and
-submits the button's own label as an ordinary `/prompt` — indistinguishable,
-server-side, from the user having typed and sent that same text; a
-submit on `setting-{key}` calls `/settings/update` and re-pushes the
-settings modal. The client never has to know which of these a given id
-means — it just forwards `{component_id, event, value}` and applies
-whatever `ui.update` ops come back.
+(awaiting a confirm), a recognized `"action"`/`"ui"` `/`-command
+(`wire/routes.py` looks it up in `actions.ACTIONS` and calls its
+`run`), or an ordinary `/prompt`, in that priority order; a click on
+`opt-{i}` resolves against the room's currently pending question's own
+option list; a click on `quick-{...}` resolves against
+`Room.quick_reply_context` and submits the button's own label as an
+ordinary `/prompt` — indistinguishable, server-side, from the user
+having typed and sent that same text; a submit on `setting-{key}`
+calls `/settings/update` and re-pushes the settings modal. The client
+never has to know which of these a given id means — it just forwards
+`{component_id, event, value}` and applies whatever `ui.update` ops
+come back.
 
 ## Rooms and persistence
 
