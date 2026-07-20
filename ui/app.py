@@ -314,20 +314,28 @@ class AgentApp(App):
             self._header_status_props = None  # _build repopulates if present
 
         existing = self._widgets.pop(target, None)
+
+        # A replace reuses the same node id (e.g. "header", "modal"), so
+        # the old and new widgets always collide on id — Textual checks
+        # id uniqueness at mount time, so the old widget must be removed
+        # *before* the new one is mounted, not after. Position is
+        # preserved by index, captured before removal shifts it.
+        parent = existing.parent if existing is not None else None
+        index = parent.children.index(existing) if parent is not None else None
+        if existing is not None:
+            self._forget_children(existing)
+            await existing.remove()
+
         new_widget = self._build(node)
 
         if target == "modal":
             await self._modal_slot.mount(new_widget)
             self._modal_slot.display = True
-            if existing is not None:
-                await existing.remove()
             return
 
-        if existing is None:
+        if parent is None:
             return
-        parent = existing.parent
-        await parent.mount(new_widget, before=existing)
-        await existing.remove()
+        await parent.mount(new_widget, before=index)
 
     async def _append(self, target: str, node: dict) -> None:
         container = self._widgets.get(target)
@@ -343,9 +351,27 @@ class AgentApp(App):
         self._node_type.pop(target, None)
         if existing is None:
             return
+        self._forget_children(existing)
         await existing.remove()
         if target == "modal":
             self._modal_slot.display = False
+
+    def _forget_children(self, widget: Widget) -> None:
+        """Purges every descendant's id from self._widgets/_node_type.
+
+        _build() registers an id for every node it constructs, including
+        nested children (e.g. "header"'s "header-status"). A replace or
+        remove only pops the top-level target's own id — without this,
+        a child that disappears when a container's shape changes (e.g.
+        header-status once a turn finishes) leaves a stale entry behind
+        forever, pointing at a widget that's no longer mounted.
+        """
+        for child in list(widget.children):
+            self._forget_children(child)
+            node_id = child.id
+            if node_id is not None:
+                self._widgets.pop(node_id, None)
+                self._node_type.pop(node_id, None)
 
     async def _mount_root(self, tree: dict) -> None:
         self._modal_slot = Vertical(id="modal-slot")

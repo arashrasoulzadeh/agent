@@ -72,4 +72,9 @@ class RawIOLogger(BaseCallbackHandler):
     def _log(self, message: str) -> None:
         logger.info(message)
         if _verbose():
-            print(f"  {message}")
+            # flush=True: stdout is block-buffered (not line-buffered)
+            # whenever it isn't a real TTY — piped through `make`, a task
+            # runner, etc. — so without this these lines can sit
+            # invisible in the buffer for a long time, unlike logger.info
+            # above (logging.StreamHandler flushes on every emit).
+            print(f"  {message}", flush=True)

@@ -41,6 +41,12 @@ class SettingSpec:
 
 
 SETTINGS: list[SettingSpec] = [
+    SettingSpec(
+        "LLM_PROVIDER",
+        "LLM provider (gapgpt, anthropic, ollama)",
+        default="gapgpt",
+        scope="new-rooms",
+    ),
     SettingSpec("GAPGPT_API_KEY", "GapGPT API key", secret=True, scope="new-rooms"),
     SettingSpec(
         "GAPGPT_BASE_URL",
@@ -52,6 +58,28 @@ SETTINGS: list[SettingSpec] = [
     SettingSpec(
         "GAPGPT_TIMEOUT", "Request timeout (s)", default="60", scope="new-rooms"
     ),
+    SettingSpec(
+        "ANTHROPIC_API_KEY", "Anthropic API key", secret=True, scope="new-rooms"
+    ),
+    SettingSpec(
+        "ANTHROPIC_MODEL",
+        "Anthropic model",
+        default="claude-sonnet-5",
+        scope="new-rooms",
+    ),
+    SettingSpec(
+        "ANTHROPIC_TIMEOUT",
+        "Anthropic request timeout (s)",
+        default="60",
+        scope="new-rooms",
+    ),
+    SettingSpec(
+        "OLLAMA_BASE_URL",
+        "Ollama base URL",
+        default="http://localhost:11434",
+        scope="new-rooms",
+    ),
+    SettingSpec("OLLAMA_MODEL", "Ollama model", scope="new-rooms"),
     SettingSpec("AGENT_VERBOSE", "Verbose LLM I/O logging", scope="immediate"),
     SettingSpec("NOTION_API_KEY", "Notion API key", secret=True, scope="immediate"),
 ]

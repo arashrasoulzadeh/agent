@@ -59,7 +59,7 @@ from agent.config import PipelineConfig
 from agent.events import LoggingStageObserver, StageEventBus
 from agent.synthesizer import ContextSynthesizer
 from core import ask_context, guard, room_context
-from llm import get_llm
+from llm import describe_active, get_llm
 from models.context import ProjectContext
 from models.project_index import ProjectIndex
 from models.project_synthesis import ProjectSynthesis
@@ -443,8 +443,8 @@ class Room:
             "id": self.id,
             "path": self.path,
             "projects": self.project_list(),
-            "model": os.getenv("GAPGPT_MODEL", "gpt-4o-mini"),
-            "base_url": os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1"),
+            "model": describe_active()[0],
+            "base_url": describe_active()[1],
             "tools": TOOL_NAMES,
             "turn_active": self.turn_active,
             "status_label": self.status_label,
@@ -488,8 +488,7 @@ class Room:
         client updates an already-mounted widget's props in place
         rather than remounting it, so resending unchanged header/footer
         props never disrupts in-progress typing in footer-input."""
-        model = os.getenv("GAPGPT_MODEL", "gpt-4o-mini")
-        base_url = os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1")
+        model, base_url = describe_active()
         header = ui_builder.header_node(
             model,
             base_url,
@@ -518,8 +517,7 @@ class Room:
         one way a given transcript kind gets drawn. Sent once, in
         /session/create's or /session/resume's response data
         (wire/routes.py) — never as part of a ui.update op."""
-        model = os.getenv("GAPGPT_MODEL", "gpt-4o-mini")
-        base_url = os.getenv("GAPGPT_BASE_URL", "https://api.gapgpt.app/v1")
+        model, base_url = describe_active()
         transcript_nodes = [
             self._content_node(
                 entry["type"],
@@ -552,7 +550,9 @@ class Room:
         self.broadcast_now(events.UI_UPDATE, {"ops": [asdict(op) for op in ops]})
 
     def _content_node(self, kind: str, **fields: Any) -> Node:
-        return ui_builder.content_entry_node(kind, uuid.uuid4().hex, **fields)
+        # "content-" prefix: Textual widget ids must not start with a
+        # digit, and a raw uuid4().hex does about 62% of the time.
+        return ui_builder.content_entry_node(kind, f"content-{uuid.uuid4().hex}", **fields)
 
     def _content_ops(self, kind: str, **fields: Any) -> list[UIOp]:
         """One append op for a new content entry, plus the same

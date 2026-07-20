@@ -62,17 +62,31 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GAPGPT_API_KEY` | — | **Required.** API key (read by the server process). |
+| `LLM_PROVIDER` | `gapgpt` | Which provider `get_llm()` builds a client for: `gapgpt`, `anthropic`, or `ollama`. |
+| `GAPGPT_API_KEY` | — | **Required** when `LLM_PROVIDER=gapgpt`. API key (read by the server process). |
 | `GAPGPT_BASE_URL` | `https://api.gapgpt.app/v1` | Any OpenAI-compatible endpoint. |
 | `GAPGPT_MODEL` | `gpt-4o-mini` | Model to use. |
 | `GAPGPT_TIMEOUT` | `60` | Per-request timeout, in seconds. |
+| `ANTHROPIC_API_KEY` | — | **Required** when `LLM_PROVIDER=anthropic`. |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5` | Model to use. |
+| `ANTHROPIC_TIMEOUT` | `60` | Per-request timeout, in seconds. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Only read when `LLM_PROVIDER=ollama`. |
+| `OLLAMA_MODEL` | — | **Required** when `LLM_PROVIDER=ollama` — whatever you've pulled locally. |
 | `AGENT_WS_HOST` | `127.0.0.1` | Where the agent server listens, and where the CLI looks for one. |
 | `AGENT_WS_PORT` | `8765` | Same, for the port. |
 | `AGENT_VERBOSE` | unset | Also print (not just log) raw LLM request/response lines. |
 | `NOTION_API_KEY` | unset | Optional. Enables the `notion_search`/`notion_read_page`/`notion_create_page`/`notion_append_text` tools. |
 
-The backend is any OpenAI-compatible API, so `GAPGPT_BASE_URL` can point at
-OpenAI, a local Ollama server, or anything else that speaks the same protocol.
+### Providers
+
+Three providers are supported (`llm/providers/`): `gapgpt` (any
+OpenAI-compatible endpoint — OpenAI itself, or a local Ollama server via its
+OpenAI-compat surface, work here too), `anthropic`, and native `ollama`.
+`LLM_PROVIDER` picks which one `get_llm()` builds; it's process-wide, so it
+applies to every room. Run `agent providers` to see which provider is active
+and which of its env vars are actually set (a static readout of `.env` and
+`settings.json`, not a live API call — accurate only when run from the same
+checkout/host as `agent-server`).
 
 ### Notion tools (optional)
 
@@ -131,13 +145,15 @@ protocol as everything else (`/settings/list`, `/settings/update` — see
 `docs/PROTOCOL.md`) and persist to `settings.json` at the repo root
 (gitignored, like `.env`), so they survive a server restart without
 needing to hand-edit `.env`. `AGENT_VERBOSE` and `NOTION_API_KEY` take
-effect immediately; the GapGPT settings (model/base URL/timeout/API key)
-only affect rooms created *after* the change — an already-open
-conversation's LLM client was already built and isn't hot-swapped.
-Secret fields (`GAPGPT_API_KEY`, `NOTION_API_KEY`) are never shown in
-cleartext: the screen shows a blank field you can type a new value into
-(masked as you type), not the real stored value; leaving one blank and
-pressing Enter is a no-op, so you can never overwrite a key by accident.
+effect immediately; `LLM_PROVIDER` and every provider-specific setting
+(GapGPT/Anthropic/Ollama's model/base URL/timeout/API key) only affect
+rooms created *after* the change — an already-open conversation's LLM
+client was already built and isn't hot-swapped.
+Secret fields (`GAPGPT_API_KEY`, `ANTHROPIC_API_KEY`, `NOTION_API_KEY`)
+are never shown in cleartext: the screen shows a blank field you can
+type a new value into (masked as you type), not the real stored value;
+leaving one blank and pressing Enter is a no-op, so you can never
+overwrite a key by accident.
 
 ### Updating / uninstalling
 
@@ -169,7 +185,9 @@ stays a simple tree, not a web:
 ```
 core/     shared, dependency-free kernel: path safety, the ask contextvar,
           the module-lifecycle contract, a generic dir-scan helper
-llm/      the LLM client (get_llm) and its raw-IO logging callback
+llm/      the LLM client (get_llm), dispatching to one of llm/providers/
+          (gapgpt, anthropic, ollama) by LLM_PROVIDER, plus a shared
+          raw-IO logging callback
 tool/     every capability the agent has, one file per tool, auto-discovered
 agent/    the reasoning engine: ProjectPipeline, ProjectAnalyst, the
           Stage/Pipeline system, ContextSynthesizer — framework-free,
@@ -490,7 +508,11 @@ The server logs through the standard `logging` module
 (`wire/app.py` configures it for the whole process) — every
 request, route failure, and raw LLM request/response line. Set
 `AGENT_VERBOSE=1` to also print the LLM request/response lines rather
-than only logging them. This is separate from room persistence:
+than only logging them. Those `AGENT_VERBOSE` print lines are always
+flushed immediately, so they still show up promptly when stdout isn't a
+real terminal — piped through `make server`, redirected to a file, run
+under a process manager — where Python would otherwise block-buffer
+them. This is separate from room persistence:
 `rooms/{uuid}.json` (see [Architecture](#architecture)) is what actually
 lets a conversation be resumed, and is written regardless of log
 verbosity.

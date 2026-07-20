@@ -9,13 +9,14 @@ any client.
 Once connected, it hands off to the full-screen TUI (ui/app.py), which
 creates or resumes a room and renders whatever the server reports.
 
-`agent update` / `agent uninstall` are a different mode entirely — self-
-management, not a project session — dispatched to self_update.py before
-any of the argument parsing below runs. Reserving those two words means
-a project literally named "update" or "uninstall" can't be opened as
-`agent update`/`agent uninstall` (it still works via `agent ./update`
-or `agent --room <id>`); an acceptable trade for not needing a
-subcommand framework here.
+`agent update` / `agent uninstall` / `agent providers` are a different
+mode entirely — self-management or provider inspection, not a project
+session — dispatched to self_update.py / llm/providers_cli.py before
+any of the argument parsing below runs. Reserving those three words
+means a project literally named "update", "uninstall", or "providers"
+can't be opened as `agent update`/`agent uninstall`/`agent providers`
+(it still works via `agent ./update` or `agent --room <id>`); an
+acceptable trade for not needing a subcommand framework here.
 """
 
 import argparse
@@ -37,6 +38,10 @@ def main(argv: list[str] | None = None) -> None:
         import self_update
 
         sys.exit(self_update.run_uninstall(raw[1:]))
+    if raw[:1] == ["providers"]:
+        import llm.providers_cli
+
+        sys.exit(llm.providers_cli.run(raw[1:]))
 
     parser = argparse.ArgumentParser(
         prog="agent",
@@ -47,8 +52,8 @@ def main(argv: list[str] | None = None) -> None:
         nargs="?",
         help=(
             "Project to analyze. Prompts for one if omitted. Ignored with "
-            "--room. ('update'/'uninstall' are reserved; see `agent update "
-            "--help`.)"
+            "--room. ('update'/'uninstall'/'providers' are reserved; see "
+            "`agent update --help`.)"
         ),
     )
     parser.add_argument(
