@@ -1,9 +1,0 @@
-httpx
-langchain
-langchain-openai
-pathspec
-python-dotenv
-rich
-textual
-watchdog
-websockets

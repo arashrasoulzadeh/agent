@@ -26,20 +26,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install dependencies
+      - name: Install the project (editable) + pytest
+        # pyproject.toml is the single source of truth for dependencies —
+        # this is the same install path `make install` uses, so CI never
+        # drifts from what a contributor actually runs locally.
         run: |
-          pip install -r requirements.txt
+          pip install -e .
           pip install pytest
       - name: Import check
-        run: python -c "import main, cli, core, llm, tool, agent, models, wire, service, ui, hooks"
+        run: |
+          python -c "import main, cli, core, llm, tool, agent, models, wire, service, ui, hooks, workspace, components, actions"
+      - name: Dependency-direction boundaries
+        run: make deps-check
       - name: Run tests
-        # `python -m` puts the repo root on sys.path so these imports resolve.
-        # The suite covers the offline guards; nothing here calls the API.
         run: python -m pytest tests/ -v
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax-check every desktop/electron source file
+        run: |
+          for f in desktop/main.js desktop/preload.js desktop/renderer.js desktop/markdown.js; do
+            node --check "$f"
+          done
+      - name: Run JS unit tests (node's built-in test runner — zero deps)
+        run: node --test desktop/markdown.test.js components/js/richStyle.test.js

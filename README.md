@@ -1,5 +1,10 @@
 # Agent
 
+[![CI](https://github.com/arashrasoulzadeh/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/arashrasoulzadeh/agent/actions/workflows/ci.yml)
+[![Release](https://github.com/arashrasoulzadeh/agent/actions/workflows/release.yml/badge.svg)](https://github.com/arashrasoulzadeh/agent/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 An interactive agent that reads a codebase and answers questions about it,
 served over a WebSocket protocol with a full-screen terminal UI as its first
 client.
@@ -37,6 +42,32 @@ always absorbs whatever's left. All three reflow automatically on resize and
 never grow past the terminal, and long transcripts scroll *inside* the
 content pane rather than scrolling your terminal's own history. The tool
 currently in flight is highlighted (`▶`) in the header's tool list.
+
+## Contents
+
+- [Install](#install)
+  - [Providers](#providers)
+  - [Notion tools (optional)](#notion-tools-optional)
+- [Usage](#usage)
+  - [Settings](#settings)
+  - [Updating / uninstalling](#updating--uninstalling)
+- [Releases](#releases)
+- [Architecture](#architecture)
+- [How it works](#how-it-works)
+  - [Tools](#tools)
+  - [Slash commands (`actions/`)](#slash-commands-actions)
+  - [Service: rooms](#service-rooms)
+  - [Server (wire)](#server-wire)
+  - [CLI (ui): a server-driven UI](#cli-ui-a-server-driven-ui)
+  - [Desktop: a second generic renderer](#desktop-a-second-generic-renderer)
+  - [Components: the vocabulary CLI, server, and desktop all share](#components-the-vocabulary-cli-server-and-desktop-all-share)
+  - [Agent-driven UI (`show_ui`)](#agent-driven-ui-show_ui)
+  - [Hooks](#hooks)
+  - [Sessions](#sessions)
+  - [Safety](#safety)
+  - [Logging](#logging)
+- [Development](#development)
+- [License](#license)
 
 ## Install
 
@@ -174,8 +205,8 @@ overwrite a key by accident.
 
 ### Updating / uninstalling
 
-There's no packaged release yet — this is a git checkout with an editable
-install (`pip install -e .`), so "update" means pulling the latest commit and
+If you installed from a git checkout (`pip install -e .`, the [Install](#install)
+instructions above), "update" means pulling the latest commit and
 reinstalling, and "uninstall" means unregistering the console scripts:
 
 ```bash
@@ -190,6 +221,33 @@ agent uninstall --yes     # skip the confirmation prompt
 `--ff-only` — it will never merge or overwrite local changes, just fail
 loudly if history has diverged. `agent uninstall` never touches your saved
 conversations or cached project indexes unless you pass `--purge`.
+
+If you installed a tagged release's wheel instead (see [Releases](#releases)
+below), update by installing the newer wheel over it (`pip install --upgrade
+agent-X.Y.Z-py3-none-any.whl`) — `agent update`'s git-based flow assumes a
+git checkout and isn't the right tool there.
+
+## Releases
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which
+builds and attaches to a GitHub Release:
+
+- **The Python package** — `agent-X.Y.Z-py3-none-any.whl` and the
+  matching `.tar.gz` sdist, built with [`build`](https://pypi.org/project/build/)
+  from `pyproject.toml`. Not published to PyPI — download the wheel
+  from the release and `pip install` it, or just use the git-checkout
+  install from [Install](#install) above; both end up running the same
+  code.
+- **The desktop app** — native installers for all three platforms,
+  built with [electron-builder](https://www.electron.build/) from
+  `desktop/`: a `.dmg` and `.zip` for macOS (x64 + arm64), an NSIS
+  `.exe` for Windows, and an `.AppImage` + `.deb` for Linux.
+
+None of these are code-signed — that needs a paid certificate this repo
+doesn't have configured — so macOS will show a Gatekeeper warning on
+first launch (right-click → Open bypasses it) and Windows SmartScreen
+may warn too. See [`CONTRIBUTING.md`](CONTRIBUTING.md#releasing) for
+how to cut a release.
 
 ## Architecture
 
@@ -752,12 +810,16 @@ verbosity.
 ## Development
 
 ```bash
-pip install ruff pytest pre-commit
-pre-commit install
-
-ruff check . && ruff format .
-python -m pytest tests/ -v
+make install       # .venv + pip install -e . + ruff/pytest/pre-commit
+make pre-commit     # installs the git hook (ruff check + format on commit)
+make check          # lint + compile + deps-check + full test suite — same gates CI runs
 ```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full dev-setup, testing,
+and release process, [`docs/README.md`](docs/README.md) for the deeper
+per-subsystem docs (protocol, tools, hooks, sessions), and
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for exactly what
+runs on every push and PR.
 
 The test suite covers the offline guards, the transport interface (a
 second, non-WebSocket implementation proves the core doesn't care which
@@ -774,4 +836,4 @@ since it needs a real OS process and isn't repeated as an automated test.
 
 ## License
 
-MIT
+[MIT](LICENSE)

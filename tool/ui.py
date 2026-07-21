@@ -19,8 +19,11 @@ from core import ui_context
 
 
 @tool
-def show_ui(blocks: list[dict[str, Any]], title: str | None = None,
-            quick_replies: list[str] | None = None) -> str:
+def show_ui(
+    blocks: list[dict[str, Any]],
+    title: str | None = None,
+    quick_replies: list[str] | None = None,
+) -> str:
     """Show the user a bordered panel of structured content instead of
     plain prose — renders the same way on the terminal and desktop
     clients. Use it when structure genuinely helps: a comparison table,

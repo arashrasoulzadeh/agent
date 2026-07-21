@@ -31,6 +31,7 @@ format: ## Reformat the codebase (ruff format)
 
 compile: ## Byte-compile every tracked .py file (fast syntax-error check)
 	@find . -name "*.py" -not -path "./.venv/*" -not -path "./build/*" \
+		-not -path "*/node_modules/*" \
 		| xargs -I{} $(PYTHON) -m py_compile {}
 
 test: ## Run the full test suite, verbose

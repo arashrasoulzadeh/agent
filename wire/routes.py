@@ -226,7 +226,9 @@ class _RouteActionContext:
         await project_remove(self._transport, {"room": self._room.id, "name": name})
 
     async def show_settings(self) -> None:
-        await self._room.push_modal(ui_builder.settings_modal_node(settings.list_settings()))
+        await self._room.push_modal(
+            ui_builder.settings_modal_node(settings.list_settings())
+        )
 
     async def show_panel(self, title: str | None, blocks: list[dict[str, Any]]) -> None:
         await self._room.append_content(

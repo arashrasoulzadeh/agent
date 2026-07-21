@@ -61,11 +61,15 @@ class TestActionValidation(unittest.TestCase):
             Action(name="/x", usage="/x", description="x", kind="ui")
 
     def test_well_formed_pre_prompt_action_constructs_cleanly(self):
-        action = Action(name="/x", usage="/x", description="x", kind="pre_prompt", text="hi ")
+        action = Action(
+            name="/x", usage="/x", description="x", kind="pre_prompt", text="hi "
+        )
         self.assertEqual(action.text, "hi ")
 
     def test_well_formed_action_kind_constructs_cleanly(self):
-        action = Action(name="/x", usage="/x", description="x", kind="action", run=_noop)
+        action = Action(
+            name="/x", usage="/x", description="x", kind="action", run=_noop
+        )
         self.assertIs(action.run, _noop)
 
 

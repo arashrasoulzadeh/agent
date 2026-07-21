@@ -1,0 +1,108 @@
+name: Release
+
+# Fires on a version tag push (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
+# Builds the Python package (sdist + wheel) and the desktop app's native
+# installers for macOS/Windows/Linux, then attaches all of them as assets
+# on a single GitHub Release for that tag — no PyPI publish, no code
+# signing: both need credentials this repo doesn't have configured, so
+# unsigned installers are the honest default (macOS Gatekeeper will warn
+# on first launch; that's expected until a paid Developer ID is added).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    # Runs first and alone so the two build jobs below only ever *upload
+    # assets* to an already-existing release, never race each other to
+    # create it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the (empty) GitHub Release for this tag
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  python-package:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches pyproject.toml's version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag v$tag_version does not match pyproject.toml's version $pkg_version"
+            exit 1
+          fi
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  desktop-package:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            build_cmd: npm run build:mac
+            artifacts: |
+              desktop/dist/*.dmg
+              desktop/dist/*.zip
+          - os: windows-latest
+            build_cmd: npm run build:win
+            artifacts: |
+              desktop/dist/*.exe
+          - os: ubuntu-latest
+            build_cmd: npm run build:linux
+            artifacts: |
+              desktop/dist/*.AppImage
+              desktop/dist/*.deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verify tag matches desktop/package.json's version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(node -p "require('./desktop/package.json').version")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag v$tag_version does not match desktop/package.json's version $pkg_version"
+            exit 1
+          fi
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build the installer(s) for this OS
+        working-directory: desktop
+        run: ${{ matrix.build_cmd }}
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: ${{ matrix.artifacts }}

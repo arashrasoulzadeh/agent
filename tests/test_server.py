@@ -259,7 +259,9 @@ class TestQuickReplyDispatch(unittest.IsolatedAsyncioTestCase):
         room_id = data["room"]
         await recv_until(ws, lambda m: m.get("event") == "answer")  # bootstrap
 
-        await send_request(ws, "/prompt", {"text": "show-me-with-replies"}, room=room_id)
+        await send_request(
+            ws, "/prompt", {"text": "show-me-with-replies"}, room=room_id
+        )
         await recv_until(
             ws, lambda m: m.get("event") == "answer" and "shown:" in m["data"]["text"]
         )
@@ -273,7 +275,10 @@ class TestQuickReplyDispatch(unittest.IsolatedAsyncioTestCase):
             label = live_room.quick_reply_context[button_id]["label"]
 
             await send_request(
-                ws, "/ui/event", {"component_id": button_id, "event": "click"}, room=room_id
+                ws,
+                "/ui/event",
+                {"component_id": button_id, "event": "click"},
+                room=room_id,
             )
             # Matched on text, not just event=="message" — an earlier
             # "message" event (echoing the "show-me-with-replies"
@@ -290,13 +295,20 @@ class TestQuickReplyDispatch(unittest.IsolatedAsyncioTestCase):
             label = live_room.quick_reply_context[button_id]["label"]
 
             await send_request(
-                ws, "/ui/event", {"component_id": button_id, "event": "click"}, room=room_id
+                ws,
+                "/ui/event",
+                {"component_id": button_id, "event": "click"},
+                room=room_id,
             )
             answer = await recv_until(
                 ws,
-                lambda m: m.get("event") == "answer" and "the user chose" in m["data"]["text"],
+                lambda m: (
+                    m.get("event") == "answer" and "the user chose" in m["data"]["text"]
+                ),
             )
-            self.assertIn('Regarding the panel titled "Comparison"', answer["data"]["text"])
+            self.assertIn(
+                'Regarding the panel titled "Comparison"', answer["data"]["text"]
+            )
             self.assertIn(f'the user chose: "{label}"', answer["data"]["text"])
 
     async def test_unknown_quick_reply_id_is_rejected(self):
@@ -332,8 +344,9 @@ class TestQuickReplyDispatch(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(TimeoutError):
                     await recv_until(
                         ws,
-                        lambda m: m.get("event") == "message"
-                        and m["data"]["text"] == label,
+                        lambda m: (
+                            m.get("event") == "message" and m["data"]["text"] == label
+                        ),
                         timeout=0.3,
                     )
             finally:
