@@ -29,9 +29,9 @@
   "nodeTypes": ["container", "text", "input", "button", "list"],
   "reservedIds": [
     "header",
-    "header-status",
     "connection-status",
     "footer",
+    "footer-status",
     "footer-info",
     "footer-input",
     "content",

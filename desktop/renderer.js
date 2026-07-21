@@ -88,7 +88,7 @@ const widgets = new Map(); // node id -> HTMLElement
 const nodeTypeById = new Map(); // node id -> node.type
 
 let connectionState = 'connecting';
-let headerStatusProps = null;
+let footerStatusProps = null;
 let spinnerFrame = 0;
 
 let commandOptions = []; // full [[value, text], ...] from the initial tree
@@ -119,12 +119,12 @@ function build(node) {
     // below), just applied to a container instead of a single text div.
     if (props.panel) applyPanelChrome(node_el, props);
   } else if (type === 'text') {
-    if (id === 'header-status') {
-      headerStatusProps = props;
-      node_el = el('div', 'node-text header-status');
+    if (id === 'footer-status') {
+      footerStatusProps = props;
+      node_el = el('div', 'node-text footer-status');
       node_el.id = id;
       widgets.set(id, node_el);
-      renderHeaderStatus(node_el);
+      renderFooterStatus(node_el);
       return node_el;
     }
     node_el = buildText(props);
@@ -343,18 +343,22 @@ function setConnectionStatus(state) {
   if (startTopbarStatus) renderConnectionStatus(startTopbarStatus);
 }
 
-function renderHeaderStatus(node_el) {
-  const frame = SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length];
-  const label = ((headerStatusProps && headerStatusProps.text) || '').trim();
-  node_el.textContent = `  ${frame} ${label}`;
-  applyRichStyleTo(node_el, headerStatusProps && headerStatusProps.style);
+function renderFooterStatus(node_el) {
+  const label = ((footerStatusProps && footerStatusProps.text) || '').trim();
+  if (!footerStatusProps || !footerStatusProps.active) {
+    node_el.textContent = `○ ${label}`;
+  } else {
+    const frame = SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length];
+    node_el.textContent = `${frame} ${label}`;
+  }
+  applyRichStyleTo(node_el, footerStatusProps && footerStatusProps.style);
 }
 
 setInterval(() => {
-  if (!headerStatusProps) return;
+  if (!footerStatusProps || !footerStatusProps.active) return;
   spinnerFrame += 1;
-  const node_el = widgets.get('header-status');
-  if (node_el) renderHeaderStatus(node_el);
+  const node_el = widgets.get('footer-status');
+  if (node_el) renderFooterStatus(node_el);
 }, 100);
 
 // ---- applying server-driven UI ops -------------------------------------
@@ -390,8 +394,8 @@ function applyOps(ops) {
 function forgetChildren(node_el) {
   // Purges every descendant's id from widgets/nodeTypeById — a replace
   // or remove only pops the top-level target's own id; without this, a
-  // child that disappears when a container's shape changes (e.g.
-  // header-status once a turn finishes) leaves a stale entry behind.
+  // child that disappears when a container's shape changes leaves a
+  // stale entry behind.
   for (const descendant of node_el.querySelectorAll('[id]')) {
     widgets.delete(descendant.id);
     nodeTypeById.delete(descendant.id);
@@ -412,7 +416,17 @@ function replaceNode(target, node) {
     }
   }
 
-  if (target === 'header') headerStatusProps = null; // build() repopulates if present
+  // footer-status rebuilds on every state broadcast (see
+  // service/ui_builder.py's footer_status_node docstring) — updating it
+  // in place, like footer-input above, avoids needless remount churn.
+  if (target === 'footer-status') {
+    const node_el = widgets.get('footer-status');
+    if (node_el) {
+      footerStatusProps = node.props || {};
+      renderFooterStatus(node_el);
+      return;
+    }
+  }
 
   const existing = widgets.get(target);
   let parent = null;
@@ -692,6 +706,20 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     dismissOverlay();
   }
+});
+
+// The native application menu (main.js's buildMenu()) sends an action
+// string for the one item that needs the renderer's own state —
+// "Settings…" — instead of reaching into it directly from main. Routed
+// through the exact same "/settings " -> submit path a typed command
+// takes, so there's only one way this ever happens, not two. A no-op
+// before a room is connected (no #footer-input mounted yet).
+window.agentNative.onMenuAction((action) => {
+  if (action !== 'settings') return;
+  const footerInput = widgets.get('footer-input');
+  if (!(footerInput instanceof HTMLInputElement)) return;
+  footerInput.value = '/settings';
+  handleInputSubmit(footerInput);
 });
 
 // ---- wire protocol: connect, request/response, events -------------------

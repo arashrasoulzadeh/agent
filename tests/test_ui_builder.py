@@ -28,32 +28,21 @@ def _find(node, node_id):
 
 
 class TestHeaderNode(unittest.TestCase):
-    def test_basic_shape_has_no_status_row_when_idle(self):
+    def test_basic_shape(self):
         node = ui_builder.header_node(
             model="gpt-4o-mini",
             base_url="https://api.gapgpt.app/v1",
             tool_names=["cat", "ls"],
             active_tool=None,
             tokens={"prompt": 0, "completion": 0, "total": 0},
-            status_label=None,
         )
         self.assertEqual(node.type, "container")
         self.assertEqual(node.id, "header")
         ids = _ids(node)
+        # Turn status lives in footer_status_node now, not here — see
+        # TestFooterStatusNode.
         self.assertNotIn("header-status", ids)
         self.assertIn("connection-status", ids)
-
-    def test_status_row_present_while_a_turn_is_running(self):
-        node = ui_builder.header_node(
-            model="gpt-4o-mini",
-            base_url="https://api.gapgpt.app/v1",
-            tool_names=[],
-            active_tool=None,
-            tokens={"prompt": 0, "completion": 0, "total": 0},
-            status_label="thinking",
-        )
-        status = next(c for c in node.children if c.id == "header-status")
-        self.assertIn("thinking", status.props["text"])
 
     def test_connection_status_slot_is_always_empty(self):
         node = ui_builder.header_node(
@@ -62,7 +51,6 @@ class TestHeaderNode(unittest.TestCase):
             tool_names=[],
             active_tool=None,
             tokens={"total": 0},
-            status_label=None,
         )
         slot = next(c for c in node.children if c.id == "connection-status")
         self.assertEqual(slot.props, {})
@@ -75,7 +63,6 @@ class TestHeaderNode(unittest.TestCase):
             tool_names=["cat", "ls"],
             active_tool="cat",
             tokens={"total": 0},
-            status_label=None,
         )
         tools = next(c for c in node.children if c.id == "header-tools")
         spans = tools.props["spans"]
@@ -98,10 +85,28 @@ class TestHeaderNode(unittest.TestCase):
             tool_names=[],
             active_tool=None,
             tokens={"total": 12345},
-            status_label=None,
         )
         tokens_node = next(c for c in node.children if c.id == "header-tokens")
         self.assertIn("12,345", tokens_node.props["text"])
+
+
+class TestFooterStatusNode(unittest.TestCase):
+    def test_idle_when_no_status_label(self):
+        node = ui_builder.footer_status_node(None)
+        self.assertEqual(node.id, "footer-status")
+        self.assertEqual(node.props["text"], "Idle")
+        self.assertFalse(node.props["active"])
+
+    def test_shows_the_active_label_while_a_turn_is_running(self):
+        node = ui_builder.footer_status_node("thinking")
+        self.assertEqual(node.props["text"], "thinking…")
+        self.assertTrue(node.props["active"])
+
+    def test_a_different_label_is_not_confused_with_idle(self):
+        node = ui_builder.footer_status_node("reading the project")
+        self.assertEqual(node.props["text"], "reading the project…")
+        self.assertNotEqual(node.props["text"], "Idle")
+        self.assertTrue(node.props["active"])
 
 
 class TestFooterNodes(unittest.TestCase):
@@ -345,10 +350,15 @@ class TestRootTree(unittest.TestCase):
         content = next(c for c in tree.children if c.id == "content")
         self.assertEqual(content.children, [entry])
 
-    def test_footer_contains_info_commands_and_input(self):
+    def test_footer_contains_status_info_commands_and_input_in_that_order(self):
+        # footer-status leads — readable "idle vs in progress" right
+        # above the prompt, before the projects line.
         tree = ui_builder.root_tree(**self._kwargs())
         footer = next(c for c in tree.children if c.id == "footer")
-        self.assertEqual(_ids(footer), ["footer-info", "command-popup", "footer-input"])
+        self.assertEqual(
+            _ids(footer),
+            ["footer-status", "footer-info", "command-popup", "footer-input"],
+        )
 
 
 class TestAgentUiNode(unittest.TestCase):
@@ -390,7 +400,9 @@ class TestAgentUiNode(unittest.TestCase):
         self.assertEqual([c.props["label"] for c in row.children], ["Yes", "No"])
 
     def test_block_kind_text(self):
-        node = ui_builder.agent_ui_node("n1", None, [{"kind": "text", "text": "hi"}], [])
+        node = ui_builder.agent_ui_node(
+            "n1", None, [{"kind": "text", "text": "hi"}], []
+        )
         block = node.children[0]
         self.assertEqual(block.type, "text")
         self.assertEqual(block.props["text"], "hi")
@@ -403,7 +415,9 @@ class TestAgentUiNode(unittest.TestCase):
         self.assertEqual(block.props["text"], "**b**")
 
     def test_block_kind_table_is_a_real_table_node_not_formatted_text(self):
-        blocks = [{"kind": "table", "headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}]
+        blocks = [
+            {"kind": "table", "headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}
+        ]
         block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
         self.assertEqual(block.type, "table")
         self.assertEqual(block.props["headers"], ["A", "B"])
@@ -415,33 +429,47 @@ class TestAgentUiNode(unittest.TestCase):
         self.assertEqual(block.props["rows"], [["1"], ["2.5"]])
 
     def test_block_kind_table_skips_malformed_rows_instead_of_crashing(self):
-        blocks = [{"kind": "table", "headers": ["A"], "rows": [["ok"], "not-a-list", None]}]
+        blocks = [
+            {"kind": "table", "headers": ["A"], "rows": [["ok"], "not-a-list", None]}
+        ]
         block = ui_builder.agent_ui_node("n1", None, blocks, []).children[0]
         self.assertEqual(block.props["rows"], [["ok"]])
 
     def test_block_kind_list_uses_colored_bullet_spans(self):
         blocks = [{"kind": "list", "items": ["x", "y"]}]
-        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        spans = (
+            ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        )
         bullets = [s for s in spans if s["text"] == "• "]
         self.assertEqual(len(bullets), 2)
         self.assertEqual(bullets[0]["style"], "bright_cyan")
-        self.assertEqual([s["text"] for s in spans if s["text"] in ("x", "y")], ["x", "y"])
+        self.assertEqual(
+            [s["text"] for s in spans if s["text"] in ("x", "y")], ["x", "y"]
+        )
 
     def test_block_kind_list_empty_degrades_to_a_placeholder(self):
         blocks = [{"kind": "list", "items": []}]
-        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        spans = (
+            ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        )
         self.assertEqual(spans[0]["text"], "(empty list)")
 
     def test_block_kind_facts_bolds_labels_and_right_aligns_to_the_longest(self):
         blocks = [{"kind": "facts", "pairs": {"Rec": "pnpm", "Reason": "fast"}}]
-        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        spans = (
+            ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        )
         labels = [s for s in spans if s["style"] == "bold bright_cyan"]
         self.assertEqual(len(labels), 2)
-        self.assertTrue(labels[0]["text"].startswith("   Rec:"))  # padded to "Reason"'s 6 chars
+        self.assertTrue(
+            labels[0]["text"].startswith("   Rec:")
+        )  # padded to "Reason"'s 6 chars
 
     def test_block_kind_facts_empty_degrades_to_a_placeholder(self):
         blocks = [{"kind": "facts", "pairs": {}}]
-        spans = ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        spans = (
+            ui_builder.agent_ui_node("n1", None, blocks, []).children[0].props["spans"]
+        )
         self.assertEqual(spans[0]["text"], "(no facts given)")
 
     def test_unrecognized_block_kind_degrades_to_a_visible_placeholder(self):
@@ -474,7 +502,10 @@ class TestSummarizeBlocks(unittest.TestCase):
 
     def test_joins_text_and_markdown_blocks(self):
         summary = ui_builder.summarize_blocks(
-            [{"kind": "text", "text": "intro"}, {"kind": "markdown", "text": "**bold**"}]
+            [
+                {"kind": "text", "text": "intro"},
+                {"kind": "markdown", "text": "**bold**"},
+            ]
         )
         self.assertIn("intro", summary)
         self.assertIn("**bold**", summary)
@@ -484,7 +515,9 @@ class TestSummarizeBlocks(unittest.TestCase):
         self.assertIn("a, b", summary)
 
     def test_includes_facts_as_key_value_pairs(self):
-        summary = ui_builder.summarize_blocks([{"kind": "facts", "pairs": {"Rec": "pnpm"}}])
+        summary = ui_builder.summarize_blocks(
+            [{"kind": "facts", "pairs": {"Rec": "pnpm"}}]
+        )
         self.assertIn("Rec: pnpm", summary)
 
     def test_table_mentions_headers_only_never_row_data(self):
@@ -495,14 +528,18 @@ class TestSummarizeBlocks(unittest.TestCase):
         self.assertNotIn("1", summary)
 
     def test_truncates_to_the_given_limit(self):
-        summary = ui_builder.summarize_blocks([{"kind": "text", "text": "x" * 500}], limit=50)
+        summary = ui_builder.summarize_blocks(
+            [{"kind": "text", "text": "x" * 500}], limit=50
+        )
         self.assertLessEqual(len(summary), 50)
 
     def test_empty_blocks_gives_an_empty_summary(self):
         self.assertEqual(ui_builder.summarize_blocks([]), "")
 
     def test_malformed_blocks_are_skipped_not_crashed_on(self):
-        summary = ui_builder.summarize_blocks(["not-a-dict", {"kind": "text", "text": "ok"}])
+        summary = ui_builder.summarize_blocks(
+            ["not-a-dict", {"kind": "text", "text": "ok"}]
+        )
         self.assertEqual(summary, "ok")
 
 

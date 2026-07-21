@@ -165,8 +165,9 @@ it is built server-side by `service/ui_builder.py`.
   pre-formatted text; `ui/app.py` renders a `rich.table.Table`,
   `desktop/renderer.js` a real `<table>`).
 - `id` — stable, meaningful, and reused across updates to the same
-  thing: `"header"`, `"footer-info"`, `"footer-input"`, `"content"`
-  (the transcript), `"modal"`, `"command-popup"`, `"connection-status"`
+  thing: `"header"`, `"footer-status"`, `"footer-info"`,
+  `"footer-input"`, `"content"` (the transcript), `"modal"`,
+  `"command-popup"`, `"connection-status"`
   (reserved — see below), `f"opt-{i}"` (a question's option buttons),
   `f"setting-{key}"` / `f"setting-{key}-row"` / `f"setting-{key}-label"`
   (a settings field and its row/label), `f"quick-{uuid4().hex}"` (a
@@ -187,10 +188,10 @@ this project's existing "resend the whole thing, don't diff"
 precedent (`session.state` already resends its full payload on every
 change):
 
-- `replace` — swap a bounded subtree (`header`, `footer-info`,
-  `footer-input`, `modal`) for a freshly built one. Sent even when
-  nothing visible actually changed (e.g. the header rebuilds on every
-  token update) — safe only because a renderer updates an
+- `replace` — swap a bounded subtree (`header`, `footer-status`,
+  `footer-info`, `footer-input`, `modal`) for a freshly built one. Sent
+  even when nothing visible actually changed (e.g. the header rebuilds
+  on every token update) — safe only because a renderer updates an
   already-mounted widget's *props* in place rather than unmounting and
   remounting it wherever that matters (see below).
 - `append` — add one child to a growing list. `content` is the only
@@ -205,10 +206,15 @@ server-owned room state:
   empty, reserved `connection-status` child; the server never writes
   to it, and a renderer never lets a `header` replace touch it either
   — it's the one node id a generic renderer owns and fills itself.
-- **Spinner animation** — `header-status`'s text says *whether* a
-  status is active and its label (`"thinking"`, `"reading the
-  project"`); the renderer animates its own glyph on a local timer,
-  never resent per-frame over the wire.
+- **Spinner animation** — `footer_status_node()` always sends a
+  `footer-status` node — `props.active` says *whether* a turn is
+  running, `props.text` its label (`"Idle"`, or `"thinking…"`/`"reading
+  the project…"`); the renderer animates its own glyph next to that
+  text on a local timer while `active` is true, never resent per-frame
+  over the wire. Deliberately the *first* child of `footer`, right
+  above the prompt — the one thing every client renders in the same
+  spot precisely so "is it my turn or is it thinking" is never a guess
+  (see the root README's Architecture section).
 
 **The command popup's data is sent once** (as part of `command-popup`,
 inside the initial `tree`) and filtered client-side as the user types

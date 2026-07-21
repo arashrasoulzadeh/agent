@@ -1,17 +1,118 @@
 'use strict';
 
 /**
- * Electron main process. Owns exactly one window and two bits of native
- * capability the renderer can't reach on its own (a folder picker, and
- * safe external-link opening) — everything else (the WebSocket
- * connection to the agent server, rendering the server-driven UI tree)
- * happens in the renderer, same division of labor as ui/app.py: this
- * process never talks to the agent server itself, it only hosts the
- * window that does.
+ * Electron main process. Owns exactly one window, the native
+ * application menu, and a couple of native capabilities the renderer
+ * can't reach on its own (a folder picker, safe external-link opening)
+ * — everything else (the WebSocket connection to the agent server,
+ * rendering the server-driven UI tree) happens in the renderer, same
+ * division of labor as ui/app.py: this process never talks to the
+ * agent server itself, it only hosts the window that does. A menu item
+ * that needs the renderer to act (Settings) sends a 'menu-action' IPC
+ * message instead of reaching into its state directly; everything else
+ * (reload, zoom, devtools, quit, ...) is a plain Electron role this
+ * process handles entirely on its own.
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
+
+function sendMenuAction(action) {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  if (win) win.webContents.send('menu-action', action);
+}
+
+// A real, native menu bar — File/Edit/View/Window/Help, with a macOS
+// app menu prepended on darwin (Electron's own default menu already
+// has all of this, but generically labeled "Electron"; this is the
+// same shape, tailored to this app, plus the two things the generic
+// default can't know about: "New Room" and "Settings"). Edit's roles
+// matter beyond convenience — without them, Cmd/Ctrl+C/V/X/A silently
+// do nothing in every text input, since Electron doesn't wire those
+// shortcuts to the DOM on its own.
+function buildMenu() {
+  const isMac = process.platform === 'darwin';
+
+  const template = [
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { label: 'Settings…', accelerator: 'Cmd+,', click: () => sendMenuAction('settings') },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Room…',
+          accelerator: 'CmdOrCtrl+N',
+          click: (_item, win) => win && win.reload(),
+        },
+        ...(isMac
+          ? []
+          : [
+              { label: 'Settings…', accelerator: 'Ctrl+,', click: () => sendMenuAction('settings') },
+            ]),
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        ...(isMac ? [{ role: 'pasteAndMatchStyle' }, { role: 'delete' }, { role: 'selectAll' }] : [{ role: 'delete' }, { type: 'separator' }, { role: 'selectAll' }]),
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [{ role: 'close' }]),
+      ],
+    },
+    {
+      role: 'help',
+      submenu: [{ role: 'about' }],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -70,7 +171,15 @@ ipcMain.handle('pick-folder', async (event) => {
   return result.filePaths[0];
 });
 
-app.whenReady().then(createWindow);
+app.setAboutPanelOptions({
+  applicationName: 'Agent',
+  applicationVersion: app.getVersion(),
+});
+
+app.whenReady().then(() => {
+  buildMenu();
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

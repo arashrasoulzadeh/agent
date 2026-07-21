@@ -519,8 +519,8 @@ class Room:
             TOOL_NAMES,
             self.active_tool,
             self.tokens,
-            self.status_label,
         )
+        footer_status = ui_builder.footer_status_node(self.status_label)
         footer_info = ui_builder.footer_info_node(
             self.path, self.project_list(), self.id
         )
@@ -529,6 +529,7 @@ class Room:
         )
         return [
             UIOp(op="replace", target="header", node=header),
+            UIOp(op="replace", target="footer-status", node=footer_status),
             UIOp(op="replace", target="footer-info", node=footer_info),
             UIOp(op="replace", target="footer-input", node=footer_input),
         ]
@@ -988,12 +989,22 @@ class Room:
             for label in (quick_replies or [])[:6]
         ]
         self.quick_reply_context.update(
-            {p["id"]: {"label": p["label"], "title": title, "summary": summary} for p in pairs}
+            {
+                p["id"]: {"label": p["label"], "title": title, "summary": summary}
+                for p in pairs
+            }
         )
-        ops = self._content_ops("agent_ui", title=title, blocks=blocks, quick_replies=pairs)
+        ops = self._content_ops(
+            "agent_ui", title=title, blocks=blocks, quick_replies=pairs
+        )
         self.broadcast_ui_now(ops)
         self.append_transcript(
-            {"type": "agent_ui", "title": title, "blocks": blocks, "quick_replies": pairs}
+            {
+                "type": "agent_ui",
+                "title": title,
+                "blocks": blocks,
+                "quick_replies": pairs,
+            }
         )
         return "Shown to the user."
 

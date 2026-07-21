@@ -47,16 +47,28 @@ saved rooms (`rooms/*.json`) from the list. From there it's the same
 header/content/footer layout as the CLI — type a follow-up at the
 bottom, `/settings` for the settings screen, `exit`/`quit`/`q` to close.
 
+A real, native application menu bar (macOS/Windows/Linux — File, Edit,
+View, Window, Help, plus a macOS app menu) rides alongside the window
+chrome: File ▸ New Room… reloads back to the start screen, File/App ▸
+Settings… opens the same settings screen `/settings` does (routed
+through the identical `"/settings"` submit path, not a second
+implementation), and Edit carries the standard OS roles (undo/copy/
+paste/select-all — without them, Cmd/Ctrl+C/V/X/A silently do nothing
+in every text input, since Electron doesn't wire those shortcuts to the
+DOM on its own).
+
 ## Layout
 
 ```
-main.js       Electron main process — one window, a folder-picker IPC
-              handler, and safe external-link opening. Never talks to
-              the agent server itself.
+main.js       Electron main process — one window, the native application
+              menu (buildMenu()), a folder-picker IPC handler, and safe
+              external-link opening. Never talks to the agent server
+              itself.
 preload.js    contextBridge: exposes components/js/richStyle.js's parser
               (not data — see this file's own docstring), AGENT_WS_HOST/
-              PORT, the folder picker, and clipboard writes to the
-              renderer. (sandbox: false — see main.js's comment for why.)
+              PORT, the folder picker, clipboard writes, and native
+              menu actions to the renderer. (sandbox: false — see
+              main.js's comment for why.)
 index.html    The page shell: a start screen, the mount point for the
               server's root tree, and a reserved modal overlay.
 renderer.js   The generic renderer itself — connects, requests/applies

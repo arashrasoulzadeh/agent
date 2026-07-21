@@ -10,10 +10,11 @@ inspect. Nothing here touches the network or spends a real API token.
 AgentApp has no room-state attributes of its own anymore (no
 `turn_active`/`awaiting_reply`/`projects` — that's server state, not
 client state) — tests read the same signals a user would see instead:
-whether `#header-status` is currently mounted (a turn is running),
-`#footer-input`'s placeholder ("Your answer…" / "y/n" means the server
-is waiting on this input for something other than a fresh prompt), and
-the rendered content/footer text.
+whether `#footer-status` currently reads "Idle" or an active label (a
+turn is running — see `footer_status_active` below), `#footer-input`'s
+placeholder ("Your answer…" / "y/n" means the server is waiting on this
+input for something other than a fresh prompt), and the rendered
+content/footer text.
 """
 
 import asyncio
@@ -56,12 +57,17 @@ async def wait_for_tree(app: AgentApp) -> None:
     await wait_until(lambda: "footer-input" in app._widgets)
 
 
+def footer_status_active(app: AgentApp) -> bool:
+    """The server-side proxy for "a turn is running": #footer-status is
+    always mounted (it reads "Idle" otherwise — see
+    service/ui_builder.py's footer_status_node), so presence alone can't
+    signal this; its `active` prop can."""
+    return bool((app._footer_status_props or {}).get("active"))
+
+
 async def wait_idle(app: AgentApp) -> None:
-    """The server-side proxy for "no turn is running": a running turn
-    always carries a status_label, which is the only thing that ever
-    mounts #header-status (see service/ui_builder.py's header_node)."""
     await wait_for_tree(app)
-    await wait_until(lambda: "header-status" not in app._widgets)
+    await wait_until(lambda: not footer_status_active(app))
 
 
 def _static_renderable(widget: Static):
@@ -149,25 +155,29 @@ class TestAgentAppLayout(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(header.height + content.height + footer.height, 60)
                 self.assertEqual(header.width, 120)
 
-    async def test_header_grows_while_working_then_shrinks_back(self):
+    async def test_footer_status_switches_between_idle_and_working_text(self):
+        # Each replace mounts a fresh #footer-status widget (see
+        # ui/app.py's _replace), so this re-queries rather than caching
+        # one reference across the state changes below.
+        def status_text() -> str:
+            return _plain(_static_renderable(app.query_one("#footer-status", Static)))
+
         async with running_server(SlowPipeline) as uri:
             app = AgentApp(uri, ".")
             async with app.run_test(size=(100, 30)) as pilot:
                 await wait_idle(app)
                 await pilot.pause(0.1)
-                idle_height = app.query_one("#header").region.height
+                self.assertIn("Idle", status_text())
 
                 app.query_one("#footer-input").focus()
                 await pilot.press(*"hello")
                 await pilot.press("enter")
-                await wait_until(lambda: "header-status" in app._widgets)
-                self.assertEqual(
-                    app.query_one("#header").region.height, idle_height + 1
-                )
+                await wait_until(lambda: footer_status_active(app))
+                self.assertNotIn("Idle", status_text())
 
                 await wait_idle(app)
                 await pilot.pause(0.05)
-                self.assertEqual(app.query_one("#header").region.height, idle_height)
+                self.assertIn("Idle", status_text())
 
     async def test_footer_input_has_no_background(self):
         async with running_server(StubPipeline) as uri:
@@ -209,7 +219,7 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
                 await wait_until(
                     lambda: (
                         footer_placeholder(app) != "Your answer…"
-                        and "header-status" not in app._widgets
+                        and not footer_status_active(app)
                     )
                 )
                 self.assertIn("got: Widget", log_text(app))
@@ -232,9 +242,7 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.click("#opt-1")  # "b"
                 await wait_until(
-                    lambda: (
-                        not modal_visible(app) and "header-status" not in app._widgets
-                    )
+                    lambda: not modal_visible(app) and not footer_status_active(app)
                 )
                 self.assertIn("got: b", log_text(app))
 
@@ -261,7 +269,7 @@ class TestAgentAppFlow(unittest.IsolatedAsyncioTestCase):
                 await wait_until(
                     lambda: (
                         footer_placeholder(app) != "Your answer…"
-                        and "header-status" not in app._widgets
+                        and not footer_status_active(app)
                     )
                 )
                 self.assertIn("got: c", log_text(app))
@@ -538,7 +546,7 @@ class TestAgentAppSettings(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: "Saved" in log_text(app))
                 await pilot.pause(0.1)
                 self.assertNotIn("stub answer to: SETTINGVALUE123", log_text(app))
-                self.assertNotIn("header-status", app._widgets)
+                self.assertFalse(footer_status_active(app))
 
 
 class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
@@ -793,9 +801,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause(0.05)
 
-                self.assertEqual(
-                    app.query_one("#footer-input", Input).value, "/add "
-                )
+                self.assertEqual(app.query_one("#footer-input", Input).value, "/add ")
 
     async def test_popup_stays_hidden_while_awaiting_reply(self):
         async with running_server(AskToolPipeline) as uri:
@@ -821,7 +827,7 @@ class TestCommandPopup(unittest.IsolatedAsyncioTestCase):
                 await wait_until(
                     lambda: (
                         footer_placeholder(app) != "Your answer…"
-                        and "header-status" not in app._widgets
+                        and not footer_status_active(app)
                     )
                 )
 
@@ -935,7 +941,9 @@ class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
                 # only walks direct children (right for every other content
                 # kind, which are flat Statics), so this queries the panel
                 # itself, recursively, instead.
-                text = "\n".join(_plain(_static_renderable(w)) for w in panel.query(Static))
+                text = "\n".join(
+                    _plain(_static_renderable(w)) for w in panel.query(Static)
+                )
                 self.assertIn("intro line", text)
                 self.assertIn("A", text)  # table header
                 self.assertIn("1", text)  # table cell
@@ -944,7 +952,7 @@ class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("x", text)  # list item
                 self.assertIn("bold", text)  # markdown block, rendered plain
 
-                await wait_until(lambda: "header-status" not in app._widgets)
+                await wait_until(lambda: not footer_status_active(app))
                 self.assertIn("shown: Shown to the user.", log_text(app))
 
     async def test_show_ui_quick_reply_click_submits_a_prompt(self):
@@ -960,19 +968,27 @@ class TestShowUiTool(unittest.IsolatedAsyncioTestCase):
 
                 panel = agent_ui_panel(app)
                 buttons = list(panel.query(Button))
-                self.assertEqual([b.label.plain for b in buttons], ["Option A", "Option B"])
+                self.assertEqual(
+                    [b.label.plain for b in buttons], ["Option A", "Option B"]
+                )
 
-                await wait_until(lambda: "header-status" not in app._widgets)
-                await pilot.click(f"#{buttons[0].id}")
+                await wait_until(lambda: not footer_status_active(app))
+                # buttons[0].press() (not pilot.click by coordinate): a
+                # quick-reply button lives inside the scrolling
+                # transcript, whose on-screen offset can still be
+                # settling right after its own just-finished append —
+                # .press() posts the identical Button.Pressed message
+                # on_button_pressed handles, with no coordinate math to
+                # race. The modal's own #opt-1 test already covers a
+                # real coordinate-based click.
+                buttons[0].press()
                 # The chat bubble stays exactly the button's own label —
                 # indistinguishable from having typed and sent that same
                 # text — while the agent's next turn (echoed back by
                 # StubPipeline, which parrots whatever it was asked)
                 # actually received the panel's title and summary folded
                 # in as context (Room.run_prompt()'s `llm_text` split).
-                await wait_until(
-                    lambda: 'the user chose: "Option A"' in log_text(app)
-                )
+                await wait_until(lambda: 'the user chose: "Option A"' in log_text(app))
                 text = log_text(app)
                 self.assertIn("> Option A", text)
                 self.assertIn('Regarding the panel titled "Comparison"', text)

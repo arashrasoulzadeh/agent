@@ -17,8 +17,9 @@ state:
     always-empty `connection-status` node the server's header leaves
     for exactly this purpose.
   - **Spinner animation**: the server only says whether a status is
-    active and its label (`header-status`'s text); the glyph frame is
-    animated locally on a timer, never resent per-frame over the wire.
+    active and its label (`footer-status`'s text/active props); the
+    glyph frame is animated locally on a timer, never resent per-frame
+    over the wire.
   - **Command-popup filtering and "exit"/"quit"/"q"**: the popup's data
     (the 4 commands) is sent once and filtered locally as the user
     types — only a completed submit round-trips. Terminating the
@@ -192,6 +193,11 @@ class AgentApp(App):
         border-top: solid $primary;
     }
 
+    #footer-status {
+        height: 1;
+        padding: 0 1;
+    }
+
     #footer-info {
         height: 1;
         color: $text-muted;
@@ -276,7 +282,7 @@ class AgentApp(App):
         # Populated by _connect()'s /ui/spec fetch, before anything else
         # runs — see this module's top-of-file comment.
         self._ui_spec: dict[str, Any] = {}
-        self._header_status_props: dict[str, Any] | None = None
+        self._footer_status_props: dict[str, Any] | None = None
         self._spinner_frame = 0
         self._pending: dict[str, asyncio.Future] = {}
         self._ui_queue: asyncio.Queue = asyncio.Queue()
@@ -427,8 +433,20 @@ class AgentApp(App):
                 widget.password = props.get("password", False)
                 return
 
-        if target == "header":
-            self._header_status_props = None  # _build repopulates if present
+        # footer-status rebuilds on *every* state broadcast — every tool
+        # call, every token update, not just when it actually changes
+        # (see footer_status_node's own docstring). Unmounting/
+        # remounting it that often churns layout for no visible reason
+        # and, worse, races anything that resolves screen coordinates
+        # against a currently-mounted widget (e.g. a test's pilot.click
+        # on a button elsewhere in the tree) — updating in place avoids
+        # both.
+        if target == "footer-status":
+            widget = self._widgets.get("footer-status")
+            if isinstance(widget, Static):
+                self._footer_status_props = node.get("props", {})
+                widget.update(self._render_footer_status())
+                return
 
         existing = self._widgets.pop(target, None)
 
@@ -446,7 +464,7 @@ class AgentApp(App):
         # "connection-status", present in every header rebuild) is
         # observably missing. That gap is real: `await existing.remove()`
         # is a genuine yield point, and anything polling self._widgets
-        # (a #header-status check, _tick's spinner, another client
+        # (a #footer-status check, _tick's spinner, another client
         # request) can run during it.
         if existing is not None:
             self._forget_children(existing)
@@ -486,11 +504,11 @@ class AgentApp(App):
         """Purges every descendant's id from self._widgets/_node_type.
 
         _build() registers an id for every node it constructs, including
-        nested children (e.g. "header"'s "header-status"). A replace or
-        remove only pops the top-level target's own id — without this,
-        a child that disappears when a container's shape changes (e.g.
-        header-status once a turn finishes) leaves a stale entry behind
-        forever, pointing at a widget that's no longer mounted.
+        nested children (e.g. "header"'s "connection-status"). A replace
+        or remove only pops the top-level target's own id — without
+        this, a child that disappears when a container's shape changes
+        leaves a stale entry behind forever, pointing at a widget that's
+        no longer mounted.
         """
         for child in list(widget.children):
             self._forget_children(child)
@@ -601,9 +619,9 @@ class AgentApp(App):
                 if padding:
                     widget.styles.padding = tuple(padding)
         elif node_type == "text":
-            if node_id == "header-status":
-                self._header_status_props = props
-                widget = Static(self._render_header_status(), id=node_id)
+            if node_id == "footer-status":
+                self._footer_status_props = props
+                widget = Static(self._render_footer_status(), id=node_id)
             else:
                 widget = Static(_render_text(props), id=node_id)
         elif node_type == "input":
@@ -672,20 +690,23 @@ class AgentApp(App):
         if widget is not None:
             widget.update(self._render_connection_status())
 
-    def _render_header_status(self) -> Text:
+    def _render_footer_status(self) -> Text:
+        props = self._footer_status_props or {}
+        label = props.get("text", "").strip()
+        style_name = props.get("style")
+        if not props.get("active"):
+            return Text(f"○ {label}", style=style_name)
         frames = self._ui_spec["spinnerFrames"]
         frame = frames[self._spinner_frame % len(frames)]
-        label = (self._header_status_props or {}).get("text", "").strip()
-        style_name = (self._header_status_props or {}).get("style")
-        return Text(f"  {frame} {label}", style=style_name)
+        return Text(f"{frame} {label}", style=style_name)
 
     def _tick(self) -> None:
-        if self._header_status_props is None:
+        if not (self._footer_status_props or {}).get("active"):
             return
         self._spinner_frame += 1
-        widget = self._widgets.get("header-status")
+        widget = self._widgets.get("footer-status")
         if widget is not None:
-            widget.update(self._render_header_status())
+            widget.update(self._render_footer_status())
 
     # ---- token estimate (client-local cosmetic, like the spinner) ---------
 
@@ -738,8 +759,14 @@ class AgentApp(App):
         input. A "ui"/"action" kind keeps the previous behavior: the
         bare "/command " token, left for the user to optionally add
         arguments to before Enter sends it on to the server."""
-        entry = next((c for c in self._command_options if c.value == command_value), None)
-        if entry is not None and entry.kind in ("pre_prompt", "post_prompt") and entry.expansion:
+        entry = next(
+            (c for c in self._command_options if c.value == command_value), None
+        )
+        if (
+            entry is not None
+            and entry.kind in ("pre_prompt", "post_prompt")
+            and entry.expansion
+        ):
             input_widget.value = entry.expansion
         else:
             input_widget.value = f"{command_value} "

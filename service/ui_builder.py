@@ -52,17 +52,12 @@ def header_node(
     tool_names: list[str],
     active_tool: str | None,
     tokens: dict[str, int],
-    status_label: str | None,
 ) -> Node:
-    """The header bar. Spinner animation for `status_label` is a purely
-    cosmetic, client-local detail (like connection status) — this only
-    says *whether* a status is active and its label text; the client
-    decides how to animate it, so this never needs resending 10x/second
-    just to advance a spinner frame.
-
-    Reserves an empty `connection-status` child the client fills and
-    owns entirely — this function never puts anything there.
-    """
+    """The header bar. Reserves an empty `connection-status` child the
+    client fills and owns entirely — this function never puts anything
+    there. Turn status (idle/thinking/...) lives in `footer_status_node`
+    instead, right above the prompt where the user is actually looking
+    while a turn runs — not up here, far from the input."""
     children = [
         _spans(
             "header-title",
@@ -77,10 +72,6 @@ def header_node(
         _text("header-config", f"  model {model}    url {base_url}", "grey62"),
         _tools_row(tool_names, active_tool),
     ]
-    if status_label is not None:
-        children.append(
-            _text("header-status", f"  {status_label}…", "bold bright_yellow")
-        )
     return Node(
         type="container",
         id="header",
@@ -96,6 +87,30 @@ def _tools_row(tool_names: list[str], active_tool: str | None) -> Node:
         tool_style = "bold bright_green" if active else "grey50"
         spans.append((("▶" if active else " ") + name + "  ", tool_style))
     return _spans("header-tools", spans)
+
+
+def footer_status_node(status_label: str | None) -> Node:
+    """The turn-status line, first thing above the prompt — always
+    present, never blank, so "is it my turn or is it thinking" is never
+    a guess. `active` tells the client whether to animate a spinner
+    glyph next to the text; the frame itself is a purely cosmetic,
+    client-local detail (like connection status), so this never needs
+    resending 10x/second just to advance it."""
+    if status_label is not None:
+        return Node(
+            type="text",
+            id="footer-status",
+            props={
+                "text": f"{status_label}…",
+                "style": "bold bright_yellow",
+                "active": True,
+            },
+        )
+    return Node(
+        type="text",
+        id="footer-status",
+        props={"text": "Idle", "style": "grey62", "active": False},
+    )
 
 
 def footer_info_node(path: str, projects: list[dict[str, Any]], room_id: str) -> Node:
@@ -480,7 +495,7 @@ def root_tree(
         id="root",
         props={"direction": "vertical"},
         children=[
-            header_node(model, base_url, tool_names, active_tool, tokens, status_label),
+            header_node(model, base_url, tool_names, active_tool, tokens),
             Node(
                 type="list",
                 id="content",
@@ -492,6 +507,7 @@ def root_tree(
                 id="footer",
                 props={"direction": "vertical"},
                 children=[
+                    footer_status_node(status_label),
                     footer_info_node(path, projects, room_id),
                     command_list_node(),
                     footer_input_node(awaiting_reply, awaiting_resync),

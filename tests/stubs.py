@@ -129,9 +129,7 @@ class ShowUiPipeline(StubPipeline):
                 {"kind": "markdown", "text": "**bold**"},
             ]
             quick_replies = (
-                ["Option A", "Option B"]
-                if question == "show-me-with-replies"
-                else None
+                ["Option A", "Option B"] if question == "show-me-with-replies" else None
             )
             result = ui_context.show("Comparison", blocks, quick_replies)
             return f"shown: {result}"
